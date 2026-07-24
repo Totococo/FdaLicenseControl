@@ -134,6 +134,9 @@ namespace FdaLicenseControl
                     btnDownloadDevices.Enabled = true;
                     cmbHistory.Enabled = true;
                     this.UseWaitCursor = false;
+                    this.Cursor = Cursors.Default;
+                    dgvZyxel.UseWaitCursor = false;
+                    dgvZyxel.Cursor = Cursors.Default;
                 }
             }
             finally
@@ -504,6 +507,14 @@ namespace FdaLicenseControl
                 lblZyxelStatus.Text = "Impossible de charger l'extraction Zyxel.";
                 MessageBox.Show(this, ex.Message, "Erreur lecture historique Zyxel", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+            finally
+            {
+                // Ensure wait cursor is never left active after loading
+                this.UseWaitCursor = false;
+                this.Cursor = Cursors.Default;
+                dgvZyxel.UseWaitCursor = false;
+                dgvZyxel.Cursor = Cursors.Default;
+            }
         }
 
         private async void Form1_Shown(object? sender, EventArgs e)
@@ -705,14 +716,14 @@ namespace FdaLicenseControl
             // If click is on the first column and within the first 28 pixels and it's an organization that can expand -> toggle expand only
             if (tag.IsOrganization && tag.Client.CanExpand && e.ColumnIndex == 0 && e.X <= 28)
             {
-                // preserve scroll position and selected organization id
+                // preserve scroll position and selected organization key
                 int savedIndex = -1;
                 try { savedIndex = dgvZyxel.FirstDisplayedScrollingRowIndex; } catch { savedIndex = -1; }
-                var orgId = tag.Client.OrganizationId;
+                var orgKey = tag.Client.OrganizationKey;
                 tag.Client.IsExpanded = !tag.Client.IsExpanded;
                 // rebuild from in-memory clients to preserve IsExpanded
                 if (_zyxelClients != null)
-                    RebuildZyxelGridFromClients(_zyxelClients, orgId, savedIndex);
+                    RebuildZyxelGridFromClients(_zyxelClients, orgKey, savedIndex);
                 return;
             }
 
@@ -738,11 +749,11 @@ namespace FdaLicenseControl
                     MessageBox.Show(this, ex.Message, "Erreur sauvegarde état UI", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
 
-                // apply to visible rows
+                // apply to visible rows matching this key only
                 for (int i = 0; i < dgvZyxel.Rows.Count; i++)
                 {
                     if (dgvZyxel.Rows[i].Tag is ZyxelGridRowTag rtag && rtag.HighlightKey == key)
-                        ApplyZyxelRowHighlight(dgvZyxel.Rows[i], key);
+                        ApplyZyxelRowHighlight(dgvZyxel.Rows[i], rtag.HighlightKey);
                 }
             }
             catch
@@ -751,7 +762,7 @@ namespace FdaLicenseControl
             }
         }
 
-        private void RebuildZyxelGridFromClients(IReadOnlyList<ZyxelNebulaClientInventory> clients, int? focusOrgId, int savedFirstIndex)
+        private void RebuildZyxelGridFromClients(IReadOnlyList<ZyxelNebulaClientInventory> clients, string? focusOrgKey, int savedFirstIndex)
         {
             dgvZyxel.Rows.Clear();
             if (clients == null)
@@ -759,9 +770,19 @@ namespace FdaLicenseControl
             for (int ci = 0; ci < clients.Count; ci++)
             {
                 var client = clients[ci];
+
+                // Validate that OrganizationKey is not empty
+                if (string.IsNullOrEmpty(client.OrganizationKey))
+                {
+#if DEBUG
+                    System.Diagnostics.Debug.WriteLine($"ERROR: Client {client.OrganizationName} has empty OrganizationKey.");
+#endif
+                    continue;
+                }
+
                 var rowIndex = dgvZyxel.Rows.Add();
                 var row = dgvZyxel.Rows[rowIndex];
-                var key = $"zyxel:organization:{client.OrganizationId}";
+                var key = $"zyxel:organization:{client.OrganizationKey.Trim()}";
                 var tag = new ZyxelGridRowTag { IsOrganization = true, Client = client, Site = null, HighlightKey = key };
                 row.Tag = tag;
                 row.DefaultCellStyle.Font = new Font(dgvZyxel.Font, FontStyle.Bold);
@@ -769,6 +790,9 @@ namespace FdaLicenseControl
                 var prefix = client.CanExpand ? (client.IsExpanded ? "▼ " : "▶ ") : string.Empty;
                 row.Cells[0].Value = prefix + client.OrganizationName;
                 row.Cells[1].Value = client.TotalLicenseCount.ToString();
+#if DEBUG
+                System.Diagnostics.Debug.WriteLine($"Zyxel row: {client.OrganizationName} | OrganizationKey={client.OrganizationKey} | HighlightKey={tag.HighlightKey}");
+#endif
                 ApplyZyxelRowHighlight(row, key);
 
                 if (client.CanExpand && client.IsExpanded)
@@ -777,7 +801,8 @@ namespace FdaLicenseControl
                     {
                         var idx = dgvZyxel.Rows.Add();
                         var rsite = dgvZyxel.Rows[idx];
-                        var skey = $"zyxel:site:{client.OrganizationId}:{site.SiteId ?? "none"}";
+                        var siteIdOrNone = string.IsNullOrEmpty(site.SiteId) ? "none" : site.SiteId.Trim();
+                        var skey = $"zyxel:site:{client.OrganizationKey.Trim()}:{siteIdOrNone}";
                         var stag = new ZyxelGridRowTag { IsOrganization = false, Client = client, Site = site, HighlightKey = skey };
                         rsite.Tag = stag;
                         rsite.Cells[0].Value = "    ↳ " + site.SiteName;
@@ -798,11 +823,11 @@ namespace FdaLicenseControl
             catch { }
 
             // optionally re-select focused org row
-            if (focusOrgId.HasValue)
+            if (!string.IsNullOrEmpty(focusOrgKey))
             {
                 for (int i = 0; i < dgvZyxel.Rows.Count; i++)
                 {
-                    if (dgvZyxel.Rows[i].Tag is ZyxelGridRowTag t && t.IsOrganization && t.Client.OrganizationId == focusOrgId.Value)
+                    if (dgvZyxel.Rows[i].Tag is ZyxelGridRowTag t && t.IsOrganization && t.Client.OrganizationKey == focusOrgKey)
                     {
                         dgvZyxel.CurrentCell = dgvZyxel.Rows[i].Cells[0];
                         break;

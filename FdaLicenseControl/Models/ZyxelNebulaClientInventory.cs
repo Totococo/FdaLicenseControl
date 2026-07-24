@@ -5,7 +5,8 @@ namespace FdaLicenseControl.Models
 {
     public sealed class ZyxelNebulaClientInventory
     {
-        public int OrganizationId { get; init; }
+        public string OrganizationId { get; init; } = string.Empty;
+        public string OrganizationKey { get; init; } = string.Empty;
         public string OrganizationName { get; init; } = string.Empty;
         public bool CanExpand { get; init; }
         public bool IsExpanded { get; set; }

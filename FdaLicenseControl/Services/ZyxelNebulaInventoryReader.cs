@@ -1,7 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
-using System.Text.Json.Nodes;
+using System.Text.Json;
 using FdaLicenseControl.Models;
 
 namespace FdaLicenseControl.Services
@@ -10,67 +11,177 @@ namespace FdaLicenseControl.Services
     {
         public ZyxelNebulaClientInventory[] Read(string filePath)
         {
-            var text = System.IO.File.ReadAllText(filePath);
-            var root = JsonNode.Parse(text) as JsonObject ?? throw new InvalidOperationException("Fichier d'inventaire Zyxel invalide.");
+            using var stream = File.OpenRead(filePath);
+            using var doc = JsonDocument.Parse(stream);
+            var root = doc.RootElement;
 
-            var orgsNode = root["organizations"] as JsonArray ?? new JsonArray();
-            var detailsNode = root["organizationDetails"] as JsonArray ?? new JsonArray();
-            var sitesNode = root["sites"] as JsonArray ?? new JsonArray();
-            var devicesNode = root["devices"] as JsonArray ?? new JsonArray();
+            // Read arrays
+            var organizationsElement = root.TryGetProperty("organizations", out var orgsEl) ? orgsEl : default;
+            var devicesElement = root.TryGetProperty("devices", out var devsEl) ? devsEl : default;
 
-            var orgMap = new Dictionary<string, List<ZyxelNebulaSiteInventory>>();
-            var orgNames = new Dictionary<string, string>();
+            // Build organization reference dictionaries
+            var orgKeyByOrgId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var orgNameByKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var s in sitesNode)
+            // Process organizations array
+            if (organizationsElement.ValueKind == JsonValueKind.Array)
             {
-                if (s is not JsonObject so) continue;
-                var orgId = so["organizationId"]?.GetValue<string>() ?? string.Empty;
-                var siteId = so["siteId"]?.GetValue<string>() ?? string.Empty;
-                var siteName = so["name"]?.GetValue<string>() ?? string.Empty;
-                var deviceCount = so["deviceCount"]?.GetValue<int?>() ?? 0;
-                var site = new ZyxelNebulaSiteInventory { SiteId = siteId, SiteName = siteName, DeviceCount = deviceCount };
-                if (!orgMap.TryGetValue(orgId, out var list)) { list = new List<ZyxelNebulaSiteInventory>(); orgMap[orgId] = list; }
-                list.Add(site);
+                foreach (var org in organizationsElement.EnumerateArray())
+                {
+                    var orgId = ReadString(org, "orgId");
+                    if (string.IsNullOrEmpty(orgId))
+                        orgId = ReadString(org, "organizationId");
+
+                    var orgName = ReadString(org, "name");
+                    if (string.IsNullOrEmpty(orgName))
+                        orgName = ReadString(org, "organizationName");
+
+                    // Resolve organization key
+                    var storedKey = ReadString(org, "organizationKey");
+                    string organizationKey;
+                    if (!string.IsNullOrEmpty(storedKey))
+                        organizationKey = storedKey;
+                    else
+                        organizationKey = ZyxelNebulaOrganizationKeyFactory.Create(orgId, orgName);
+
+                    // Store mappings
+                    if (!string.IsNullOrEmpty(orgId))
+                        orgKeyByOrgId[orgId] = organizationKey;
+                    orgNameByKey[organizationKey] = orgName;
+                }
             }
 
-            foreach (var d in detailsNode)
+            // Aggregate devices by organization key
+            var devicesByOrgKey = new Dictionary<string, List<JsonElement>>(StringComparer.OrdinalIgnoreCase);
+            var orgIdByKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            if (devicesElement.ValueKind == JsonValueKind.Array)
             {
-                if (d is not JsonObject dob) continue;
-                var orgId = dob["organizationId"]?.GetValue<string>() ?? string.Empty;
-                var orgName = dob["organizationName"]?.GetValue<string>() ?? string.Empty;
-                if (!orgNames.ContainsKey(orgId)) orgNames[orgId] = orgName;
+                foreach (var device in devicesElement.EnumerateArray())
+                {
+                    var storedKey = ReadString(device, "organizationKey");
+                    var orgId = ReadString(device, "organizationId");
+                    if (string.IsNullOrEmpty(orgId))
+                        orgId = ReadString(device, "orgId");
+                    var orgName = ReadString(device, "organizationName");
+
+                    // Resolve organization key
+                    string organizationKey;
+                    if (!string.IsNullOrEmpty(storedKey))
+                        organizationKey = storedKey;
+                    else if (!string.IsNullOrEmpty(orgId) && orgKeyByOrgId.TryGetValue(orgId, out var mappedKey))
+                        organizationKey = mappedKey;
+                    else
+                        organizationKey = ZyxelNebulaOrganizationKeyFactory.Create(orgId, orgName);
+
+                    // Store device
+                    if (!devicesByOrgKey.TryGetValue(organizationKey, out var deviceList))
+                    {
+                        deviceList = new List<JsonElement>();
+                        devicesByOrgKey[organizationKey] = deviceList;
+                    }
+                    deviceList.Add(device);
+
+                    // Store orgId for this key
+                    if (!string.IsNullOrEmpty(orgId) && !orgIdByKey.ContainsKey(organizationKey))
+                        orgIdByKey[organizationKey] = orgId;
+
+                    // Store name if not already present
+                    if (!orgNameByKey.ContainsKey(organizationKey) && !string.IsNullOrEmpty(orgName))
+                        orgNameByKey[organizationKey] = orgName;
+                }
             }
 
+            // Build clients
             var clients = new List<ZyxelNebulaClientInventory>();
-            foreach (var o in orgsNode)
-            {
-                if (o is not JsonObject oo) continue;
-                var orgId = oo["orgId"]?.GetValue<string>() ?? string.Empty;
-                var orgName = oo["name"]?.GetValue<string>() ?? string.Empty;
-                var sites = orgMap.TryGetValue(orgId, out var list) ? list : new List<ZyxelNebulaSiteInventory>();
-                var totalDeviceCount = sites.Sum(x => x.DeviceCount);
-                // Validate totals: sum of site licenses == organization totalDeviceCount from details if available
-                int reportedTotal = 0;
-                var det = detailsNode.FirstOrDefault(x => x is JsonObject jd && (jd["organizationId"]?.GetValue<string>() ?? string.Empty) == orgId) as JsonObject;
-                if (det != null)
-                    reportedTotal = det["deviceCount"]?.GetValue<int?>() ?? 0;
+            var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                if (reportedTotal != 0 && reportedTotal != totalDeviceCount)
-                    throw new InvalidOperationException($"Le total des licences Zyxel est incohérent pour l'organisation {orgName}.");
+            foreach (var kvp in devicesByOrgKey)
+            {
+                var organizationKey = kvp.Key;
+                var devices = kvp.Value;
+
+                // Check for duplicate keys
+                if (!seenKeys.Add(organizationKey))
+                    throw new InvalidOperationException($"La clé stable Zyxel est dupliquée entre plusieurs clients : {organizationKey}.");
+
+                // Resolve organization ID
+                var organizationId = orgIdByKey.TryGetValue(organizationKey, out var oid) ? oid : string.Empty;
+
+                // Resolve organization name
+                string clientName;
+                if (orgNameByKey.TryGetValue(organizationKey, out var storedName))
+                    clientName = storedName;
+                else if (!string.IsNullOrEmpty(organizationId))
+                    clientName = $"Organisation inconnue ({organizationId})";
+                else
+                    clientName = "Organisation Zyxel inconnue";
+
+                // Aggregate sites
+                var siteAggregates = new Dictionary<string, (string siteName, int deviceCount)>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var device in devices)
+                {
+                    var siteId = ReadString(device, "siteId");
+                    var siteName = ReadString(device, "siteName");
+
+                    var siteKey = string.IsNullOrEmpty(siteId) ? "none" : siteId;
+
+                    if (!siteAggregates.TryGetValue(siteKey, out var aggregate))
+                        aggregate = (siteName: string.IsNullOrEmpty(siteName) ? "Sans site" : siteName, deviceCount: 0);
+
+                    aggregate.deviceCount++;
+                    siteAggregates[siteKey] = aggregate;
+                }
+
+                // Build sites
+                var sites = siteAggregates
+                    .Select(s => new ZyxelNebulaSiteInventory
+                    {
+                        SiteId = s.Key == "none" ? null : s.Key,
+                        SiteName = s.Value.siteName,
+                        DeviceCount = s.Value.deviceCount
+                    })
+                    .OrderBy(s => s.SiteName)
+                    .ToArray();
+
+                var totalDeviceCount = devices.Count;
 
                 var client = new ZyxelNebulaClientInventory
                 {
-                    OrganizationId = int.TryParse(orgId, out var iid) ? iid : 0,
-                    OrganizationName = orgName,
-                    CanExpand = sites.Count > 0,
+                    OrganizationId = organizationId,
+                    OrganizationKey = organizationKey,
+                    OrganizationName = clientName,
+                    CanExpand = sites.Length > 1,
                     IsExpanded = false,
-                    Sites = sites.ToArray(),
+                    Sites = sites,
                     TotalDeviceCount = totalDeviceCount
                 };
+
                 clients.Add(client);
             }
 
-            return clients.ToArray();
+            // Validate totals
+            var totalLicenses = clients.Sum(c => c.TotalLicenseCount);
+            var totalDevices = devicesByOrgKey.Sum(kvp => kvp.Value.Count);
+            if (totalLicenses != totalDevices)
+                throw new InvalidOperationException($"Le total des licences ({totalLicenses}) ne correspond pas au nombre de devices ({totalDevices}).");
+
+            return clients.OrderBy(c => c.OrganizationName).ToArray();
+        }
+
+        private static string ReadString(JsonElement jsonObject, string propertyName)
+        {
+            if (jsonObject.ValueKind != JsonValueKind.Object)
+                return string.Empty;
+
+            if (!jsonObject.TryGetProperty(propertyName, out var value))
+                return string.Empty;
+
+            if (value.ValueKind != JsonValueKind.String)
+                return string.Empty;
+
+            return value.GetString()?.Trim() ?? string.Empty;
         }
     }
 }

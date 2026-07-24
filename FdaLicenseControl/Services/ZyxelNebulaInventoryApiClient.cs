@@ -64,8 +64,13 @@ namespace FdaLicenseControl.Services
                 if (string.IsNullOrEmpty(orgName))
                     throw new InvalidOperationException($"Organisation sans nom à l'index {index}.");
 
-                // keep original organization copy
-                organizations.Add(orgObj.DeepClone());
+                // Calculate organization key once for this organization
+                var organizationKey = ZyxelNebulaOrganizationKeyFactory.Create(orgId, orgName);
+
+                // Clone and enrich original organization
+                var enrichedOrg = orgObj.DeepClone();
+                enrichedOrg["organizationKey"] = organizationKey;
+                organizations.Add(enrichedOrg);
 
                 // check mode
                 var mode = orgObj["mode"]?.GetValue<string>()?.Trim();
@@ -80,6 +85,7 @@ namespace FdaLicenseControl.Services
                     {
                         ["organizationId"] = orgId,
                         ["organizationName"] = orgName,
+                        ["organizationKey"] = organizationKey,
                         ["mode"] = mode,
                         ["httpStatus"] = null,
                         ["reason"] = $"Organisation non prise en charge par l’OpenAPI en mode {mode}."
@@ -101,6 +107,7 @@ namespace FdaLicenseControl.Services
                         throw new InvalidOperationException($"Échec de récupération des détails pour l'organisation {orgId}.");
                     detailTemp["organizationId"] = orgId;
                     detailTemp["organizationName"] = orgName;
+                    detailTemp["organizationKey"] = organizationKey;
 
                     // sites
                     var sitesArray = await GetJsonArrayAsync($"{baseUrl}/v1/nebula/organizations/{WebUtility.UrlEncode(orgId)}/sites", apiKey, cancellationToken);
@@ -111,6 +118,7 @@ namespace FdaLicenseControl.Services
                         var clone = siteObj.DeepClone();
                         clone["organizationId"] = orgId;
                         clone["organizationName"] = orgName;
+                        clone["organizationKey"] = organizationKey;
                         sitesTemp.Add(clone);
                     }
 
@@ -144,6 +152,7 @@ namespace FdaLicenseControl.Services
                             var clone = devObj.DeepClone();
                             clone["organizationId"] = orgId;
                             clone["organizationName"] = orgName;
+                            clone["organizationKey"] = organizationKey;
                             clone["siteId"] = siteId;
                             clone["siteName"] = siteName;
                             devicesTemp.Add(clone);
@@ -165,6 +174,7 @@ namespace FdaLicenseControl.Services
                     {
                         ["organizationId"] = orgId,
                         ["organizationName"] = orgName,
+                        ["organizationKey"] = organizationKey,
                         ["mode"] = "PRO",
                         ["httpStatus"] = (int)HttpStatusCode.Forbidden,
                         ["reason"] = "Accès interdit par Zyxel Nebula pour cette organisation.",
