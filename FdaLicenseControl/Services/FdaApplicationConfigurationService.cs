@@ -25,6 +25,7 @@ namespace FdaLicenseControl.Services
 
                 if (cfg.NinjaOne == null) cfg.NinjaOne = new NinjaOneSettings();
                 if (cfg.ZyxelNebula == null) cfg.ZyxelNebula = new ZyxelNebulaSettings();
+                if (cfg.MicrosoftPartner == null) cfg.MicrosoftPartner = new MicrosoftPartnerSettings();
 
                 // Trim and normalize
                 cfg.NinjaOne.BaseUrl = (cfg.NinjaOne.BaseUrl ?? string.Empty).Trim();
@@ -32,23 +33,52 @@ namespace FdaLicenseControl.Services
                 cfg.NinjaOne.ClientSecret = (cfg.NinjaOne.ClientSecret ?? string.Empty).Trim();
                 cfg.ZyxelNebula.BaseUrl = (cfg.ZyxelNebula.BaseUrl ?? string.Empty).Trim();
                 cfg.ZyxelNebula.ApiKey = (cfg.ZyxelNebula.ApiKey ?? string.Empty).Trim();
+                cfg.MicrosoftPartner.PartnerTenantId = (cfg.MicrosoftPartner.PartnerTenantId ?? string.Empty).Trim();
+                cfg.MicrosoftPartner.ClientId = (cfg.MicrosoftPartner.ClientId ?? string.Empty).Trim();
+                cfg.MicrosoftPartner.BaseUrl = (cfg.MicrosoftPartner.BaseUrl ?? string.Empty).Trim();
 
                 if (cfg.NinjaOne.BaseUrl.EndsWith('/'))
                     cfg.NinjaOne.BaseUrl = cfg.NinjaOne.BaseUrl.Substring(0, cfg.NinjaOne.BaseUrl.Length - 1);
                 if (cfg.ZyxelNebula.BaseUrl.EndsWith('/'))
                     cfg.ZyxelNebula.BaseUrl = cfg.ZyxelNebula.BaseUrl.Substring(0, cfg.ZyxelNebula.BaseUrl.Length - 1);
+                if (cfg.MicrosoftPartner.BaseUrl.EndsWith('/'))
+                    cfg.MicrosoftPartner.BaseUrl = cfg.MicrosoftPartner.BaseUrl.Substring(0, cfg.MicrosoftPartner.BaseUrl.Length - 1);
+
+                if (string.IsNullOrEmpty(cfg.MicrosoftPartner.BaseUrl))
+                    cfg.MicrosoftPartner.BaseUrl = "https://api.partnercenter.microsoft.com";
 
                 // Validate NinjaOne
                 if (string.IsNullOrEmpty(cfg.NinjaOne.BaseUrl) || string.IsNullOrEmpty(cfg.NinjaOne.ClientId) || string.IsNullOrEmpty(cfg.NinjaOne.ClientSecret))
                     throw new InvalidOperationException("La configuration NinjaOne est incomplète.");
                 if (!Uri.TryCreate(cfg.NinjaOne.BaseUrl, UriKind.Absolute, out var nuri) || nuri.Scheme != Uri.UriSchemeHttps)
-                    throw new InvalidOperationException("L’URL NinjaOne doit être une adresse HTTPS valide.");
+                    throw new InvalidOperationException("L'URL NinjaOne doit être une adresse HTTPS valide.");
 
                 // Validate Zyxel
                 if (string.IsNullOrEmpty(cfg.ZyxelNebula.BaseUrl) || string.IsNullOrEmpty(cfg.ZyxelNebula.ApiKey))
                     throw new InvalidOperationException("La configuration Zyxel Nebula est incomplète.");
                 if (!Uri.TryCreate(cfg.ZyxelNebula.BaseUrl, UriKind.Absolute, out var zuri) || zuri.Scheme != Uri.UriSchemeHttps)
-                    throw new InvalidOperationException("L’URL de l’API Zyxel Nebula doit être une adresse HTTPS valide.");
+                    throw new InvalidOperationException("L'URL de l'API Zyxel Nebula doit être une adresse HTTPS valide.");
+
+                // Validate Microsoft Partner (optional)
+                var msTenantId = cfg.MicrosoftPartner.PartnerTenantId;
+                var msClientId = cfg.MicrosoftPartner.ClientId;
+                if (!string.IsNullOrEmpty(msTenantId) || !string.IsNullOrEmpty(msClientId))
+                {
+                    if (string.IsNullOrEmpty(msTenantId) || string.IsNullOrEmpty(msClientId))
+                        throw new InvalidOperationException("La configuration Microsoft 365 est incomplète.");
+
+                    if (!Guid.TryParse(msTenantId, out var tenantGuid) || tenantGuid == Guid.Empty)
+                        throw new InvalidOperationException("L'identifiant du tenant partenaire Microsoft n'est pas valide.");
+
+                    if (!Guid.TryParse(msClientId, out var clientGuid) || clientGuid == Guid.Empty)
+                        throw new InvalidOperationException("L'identifiant de l'application Microsoft n'est pas valide.");
+                }
+
+                if (!string.IsNullOrEmpty(cfg.MicrosoftPartner.BaseUrl))
+                {
+                    if (!Uri.TryCreate(cfg.MicrosoftPartner.BaseUrl, UriKind.Absolute, out var msUri) || msUri.Scheme != Uri.UriSchemeHttps)
+                        throw new InvalidOperationException("L'URL Partner Center doit être une adresse HTTPS valide.");
+                }
 
                 return cfg;
             }
@@ -66,27 +96,57 @@ namespace FdaLicenseControl.Services
             // Apply same normalization and validation as LoadFromFile
             configuration.NinjaOne ??= new NinjaOneSettings();
             configuration.ZyxelNebula ??= new ZyxelNebulaSettings();
+            configuration.MicrosoftPartner ??= new MicrosoftPartnerSettings();
 
             configuration.NinjaOne.BaseUrl = (configuration.NinjaOne.BaseUrl ?? string.Empty).Trim();
             configuration.NinjaOne.ClientId = (configuration.NinjaOne.ClientId ?? string.Empty).Trim();
             configuration.NinjaOne.ClientSecret = (configuration.NinjaOne.ClientSecret ?? string.Empty).Trim();
             configuration.ZyxelNebula.BaseUrl = (configuration.ZyxelNebula.BaseUrl ?? string.Empty).Trim();
             configuration.ZyxelNebula.ApiKey = (configuration.ZyxelNebula.ApiKey ?? string.Empty).Trim();
+            configuration.MicrosoftPartner.PartnerTenantId = (configuration.MicrosoftPartner.PartnerTenantId ?? string.Empty).Trim();
+            configuration.MicrosoftPartner.ClientId = (configuration.MicrosoftPartner.ClientId ?? string.Empty).Trim();
+            configuration.MicrosoftPartner.BaseUrl = (configuration.MicrosoftPartner.BaseUrl ?? string.Empty).Trim();
 
             if (configuration.NinjaOne.BaseUrl.EndsWith('/'))
                 configuration.NinjaOne.BaseUrl = configuration.NinjaOne.BaseUrl.Substring(0, configuration.NinjaOne.BaseUrl.Length - 1);
             if (configuration.ZyxelNebula.BaseUrl.EndsWith('/'))
                 configuration.ZyxelNebula.BaseUrl = configuration.ZyxelNebula.BaseUrl.Substring(0, configuration.ZyxelNebula.BaseUrl.Length - 1);
+            if (configuration.MicrosoftPartner.BaseUrl.EndsWith('/'))
+                configuration.MicrosoftPartner.BaseUrl = configuration.MicrosoftPartner.BaseUrl.Substring(0, configuration.MicrosoftPartner.BaseUrl.Length - 1);
+
+            if (string.IsNullOrEmpty(configuration.MicrosoftPartner.BaseUrl))
+                configuration.MicrosoftPartner.BaseUrl = "https://api.partnercenter.microsoft.com";
 
             if (string.IsNullOrEmpty(configuration.NinjaOne.BaseUrl) || string.IsNullOrEmpty(configuration.NinjaOne.ClientId) || string.IsNullOrEmpty(configuration.NinjaOne.ClientSecret))
                 throw new InvalidOperationException("La configuration NinjaOne est incomplète.");
             if (!Uri.TryCreate(configuration.NinjaOne.BaseUrl, UriKind.Absolute, out var nuri) || nuri.Scheme != Uri.UriSchemeHttps)
-                throw new InvalidOperationException("L’URL NinjaOne doit être une adresse HTTPS valide.");
+                throw new InvalidOperationException("L'URL NinjaOne doit être une adresse HTTPS valide.");
 
             if (string.IsNullOrEmpty(configuration.ZyxelNebula.BaseUrl) || string.IsNullOrEmpty(configuration.ZyxelNebula.ApiKey))
                 throw new InvalidOperationException("La configuration Zyxel Nebula est incomplète.");
             if (!Uri.TryCreate(configuration.ZyxelNebula.BaseUrl, UriKind.Absolute, out var zuri) || zuri.Scheme != Uri.UriSchemeHttps)
-                throw new InvalidOperationException("L’URL de l’API Zyxel Nebula doit être une adresse HTTPS valide.");
+                throw new InvalidOperationException("L'URL de l'API Zyxel Nebula doit être une adresse HTTPS valide.");
+
+            // Validate Microsoft Partner (optional)
+            var expMsTenantId = configuration.MicrosoftPartner.PartnerTenantId;
+            var expMsClientId = configuration.MicrosoftPartner.ClientId;
+            if (!string.IsNullOrEmpty(expMsTenantId) || !string.IsNullOrEmpty(expMsClientId))
+            {
+                if (string.IsNullOrEmpty(expMsTenantId) || string.IsNullOrEmpty(expMsClientId))
+                    throw new InvalidOperationException("La configuration Microsoft 365 est incomplète.");
+
+                if (!Guid.TryParse(expMsTenantId, out var tenantGuid) || tenantGuid == Guid.Empty)
+                    throw new InvalidOperationException("L'identifiant du tenant partenaire Microsoft n'est pas valide.");
+
+                if (!Guid.TryParse(expMsClientId, out var clientGuid) || clientGuid == Guid.Empty)
+                    throw new InvalidOperationException("L'identifiant de l'application Microsoft n'est pas valide.");
+            }
+
+            if (!string.IsNullOrEmpty(configuration.MicrosoftPartner.BaseUrl))
+            {
+                if (!Uri.TryCreate(configuration.MicrosoftPartner.BaseUrl, UriKind.Absolute, out var msUri) || msUri.Scheme != Uri.UriSchemeHttps)
+                    throw new InvalidOperationException("L'URL Partner Center doit être une adresse HTTPS valide.");
+            }
 
             var folder = Path.GetDirectoryName(filePath) ?? string.Empty;
             if (!string.IsNullOrEmpty(folder))

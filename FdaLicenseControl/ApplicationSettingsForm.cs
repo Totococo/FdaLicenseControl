@@ -23,6 +23,12 @@ namespace FdaLicenseControl
         private TextBox txtZyxelApiKey;
         private Button btnZyxelTest;
 
+        // Microsoft controls
+        private TextBox txtMicrosoftPartnerTenantId;
+        private TextBox txtMicrosoftClientId;
+        private TextBox txtMicrosoftBaseUrl;
+        private Button btnMicrosoftTest;
+
         // Global buttons
         private Button btnImportAll;
         private Button btnExportAll;
@@ -52,12 +58,15 @@ namespace FdaLicenseControl
             tabControl = new TabControl { Dock = DockStyle.Fill };
             var tabNinja = new TabPage("NinjaOne");
             var tabZyxel = new TabPage("Zyxel Nebula");
+            var tabMicrosoft = new TabPage("Microsoft 365");
 
             BuildNinjaTab(tabNinja);
             BuildZyxelTab(tabZyxel);
+            BuildMicrosoftTab(tabMicrosoft);
 
             tabControl.TabPages.Add(tabNinja);
             tabControl.TabPages.Add(tabZyxel);
+            tabControl.TabPages.Add(tabMicrosoft);
 
             // Bottom buttons: Import, Export, Cancel, Save
             var btnPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, Dock = DockStyle.Fill, AutoSize = true };
@@ -152,6 +161,41 @@ namespace FdaLicenseControl
             // import/export handled globally
         }
 
+        private void BuildMicrosoftTab(TabPage tab)
+        {
+            var tl = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 4, Padding = new Padding(12) };
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
+            tl.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            tl.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            tl.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            var lblTenantId = new Label { Text = "Tenant partenaire :", Anchor = AnchorStyles.Left | AnchorStyles.Right, AutoSize = true };
+            txtMicrosoftPartnerTenantId = new TextBox { Dock = DockStyle.Fill };
+            var lblClientId = new Label { Text = "ID de l'application :", Anchor = AnchorStyles.Left | AnchorStyles.Right, AutoSize = true };
+            txtMicrosoftClientId = new TextBox { Dock = DockStyle.Fill };
+            var lblUrl = new Label { Text = "URL Partner Center :", Anchor = AnchorStyles.Left | AnchorStyles.Right, AutoSize = true };
+            txtMicrosoftBaseUrl = new TextBox { Dock = DockStyle.Fill };
+
+            tl.Controls.Add(lblTenantId, 0, 0);
+            tl.Controls.Add(txtMicrosoftPartnerTenantId, 1, 0);
+            tl.Controls.Add(lblClientId, 0, 1);
+            tl.Controls.Add(txtMicrosoftClientId, 1, 1);
+            tl.Controls.Add(lblUrl, 0, 2);
+            tl.Controls.Add(txtMicrosoftBaseUrl, 1, 2);
+
+            var btnPanel = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, AutoSize = true };
+            btnMicrosoftTest = new Button { Text = "Tester la connexion", AutoSize = true };
+            btnPanel.Controls.Add(btnMicrosoftTest);
+            tl.Controls.Add(btnPanel, 0, 3);
+            tl.SetColumnSpan(btnPanel, 2);
+
+            tab.Controls.Add(tl);
+
+            btnMicrosoftTest.Click += BtnMicrosoftTest_Click;
+        }
+
         private void ApplicationSettingsForm_Load(object? sender, EventArgs e)
         {
             // Load existing values
@@ -174,6 +218,17 @@ namespace FdaLicenseControl
             catch (Exception ex)
             {
                 MessageBox.Show(this, ex.Message, "Erreur lecture configuration Zyxel", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            try
+            {
+                txtMicrosoftPartnerTenantId.Text = MicrosoftPartnerSettingsService.GetPartnerTenantId();
+                txtMicrosoftClientId.Text = MicrosoftPartnerSettingsService.GetClientId();
+                txtMicrosoftBaseUrl.Text = MicrosoftPartnerSettingsService.GetBaseUrl();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Erreur lecture configuration Microsoft", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -224,11 +279,53 @@ namespace FdaLicenseControl
                 return;
             }
 
-            // All good; save both
+            // Gather and validate Microsoft (optional)
+            var msPartnerTenantId = txtMicrosoftPartnerTenantId.Text?.Trim() ?? string.Empty;
+            var msClientId = txtMicrosoftClientId.Text?.Trim() ?? string.Empty;
+            var msBaseUrl = txtMicrosoftBaseUrl.Text?.Trim() ?? string.Empty;
+            if (msBaseUrl.EndsWith("/"))
+                msBaseUrl = msBaseUrl.Substring(0, msBaseUrl.Length - 1);
+
+            if (string.IsNullOrEmpty(msBaseUrl))
+                msBaseUrl = "https://api.partnercenter.microsoft.com";
+
+            if (!string.IsNullOrEmpty(msPartnerTenantId) || !string.IsNullOrEmpty(msClientId))
+            {
+                if (string.IsNullOrEmpty(msPartnerTenantId) || string.IsNullOrEmpty(msClientId))
+                {
+                    tabControl.SelectedIndex = 2;
+                    MessageBox.Show(this, "La configuration Microsoft 365 est incomplète.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                if (!Guid.TryParse(msPartnerTenantId, out var msTenantGuid) || msTenantGuid == Guid.Empty)
+                {
+                    tabControl.SelectedIndex = 2;
+                    MessageBox.Show(this, "L'identifiant du tenant partenaire Microsoft n'est pas valide.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                if (!Guid.TryParse(msClientId, out var msClientGuid) || msClientGuid == Guid.Empty)
+                {
+                    tabControl.SelectedIndex = 2;
+                    MessageBox.Show(this, "L'identifiant de l'application Microsoft n'est pas valide.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                if (!Uri.TryCreate(msBaseUrl, UriKind.Absolute, out var msUri) || msUri.Scheme != Uri.UriSchemeHttps)
+                {
+                    tabControl.SelectedIndex = 2;
+                    MessageBox.Show(this, "L'URL Partner Center doit être une adresse HTTPS valide.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
+
+            // All good; save all
             try
             {
                 NinjaOneSettingsService.Save(ninjaBaseUrl, ninjaClientId, ninjaClientSecret);
                 ZyxelNebulaSettingsService.Save(zyxelBaseUrl, zyxelApiKey);
+                MicrosoftPartnerSettingsService.Save(msPartnerTenantId, msClientId, msBaseUrl);
             }
             catch (Exception ex)
             {
@@ -256,6 +353,9 @@ namespace FdaLicenseControl
                 txtNinjaClientSecret.Text = cfg.NinjaOne.ClientSecret;
                 txtZyxelBaseUrl.Text = cfg.ZyxelNebula.BaseUrl;
                 txtZyxelApiKey.Text = cfg.ZyxelNebula.ApiKey;
+                txtMicrosoftPartnerTenantId.Text = cfg.MicrosoftPartner?.PartnerTenantId ?? string.Empty;
+                txtMicrosoftClientId.Text = cfg.MicrosoftPartner?.ClientId ?? string.Empty;
+                txtMicrosoftBaseUrl.Text = cfg.MicrosoftPartner?.BaseUrl ?? "https://api.partnercenter.microsoft.com";
                 tabControl.SelectedIndex = 0;
                 MessageBox.Show(this, "La configuration complète a été chargée.\n\nCliquez sur Enregistrer pour l’appliquer.", "Configuration importée", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -276,6 +376,12 @@ namespace FdaLicenseControl
             var zyxelBaseUrl = txtZyxelBaseUrl.Text?.Trim() ?? string.Empty;
             var zyxelApiKey = txtZyxelApiKey.Text?.Trim() ?? string.Empty;
             if (zyxelBaseUrl.EndsWith("/")) zyxelBaseUrl = zyxelBaseUrl.Substring(0, zyxelBaseUrl.Length - 1);
+
+            var msPartnerTenantId = txtMicrosoftPartnerTenantId.Text?.Trim() ?? string.Empty;
+            var msClientId = txtMicrosoftClientId.Text?.Trim() ?? string.Empty;
+            var msBaseUrl = txtMicrosoftBaseUrl.Text?.Trim() ?? string.Empty;
+            if (msBaseUrl.EndsWith("/")) msBaseUrl = msBaseUrl.Substring(0, msBaseUrl.Length - 1);
+            if (string.IsNullOrEmpty(msBaseUrl)) msBaseUrl = "https://api.partnercenter.microsoft.com";
 
             // Validate ninja
             if (string.IsNullOrEmpty(ninjaBaseUrl) || string.IsNullOrEmpty(ninjaClientId) || string.IsNullOrEmpty(ninjaClientSecret))
@@ -305,8 +411,39 @@ namespace FdaLicenseControl
                 return;
             }
 
+            if (!string.IsNullOrEmpty(msPartnerTenantId) || !string.IsNullOrEmpty(msClientId))
+            {
+                if (string.IsNullOrEmpty(msPartnerTenantId) || string.IsNullOrEmpty(msClientId))
+                {
+                    tabControl.SelectedIndex = 2;
+                    MessageBox.Show(this, "La configuration Microsoft 365 est incomplète.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                if (!Guid.TryParse(msPartnerTenantId, out var msTenantGuid) || msTenantGuid == Guid.Empty)
+                {
+                    tabControl.SelectedIndex = 2;
+                    MessageBox.Show(this, "L'identifiant du tenant partenaire Microsoft n'est pas valide.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                if (!Guid.TryParse(msClientId, out var msClientGuid) || msClientGuid == Guid.Empty)
+                {
+                    tabControl.SelectedIndex = 2;
+                    MessageBox.Show(this, "L'identifiant de l'application Microsoft n'est pas valide.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+
+                if (!Uri.TryCreate(msBaseUrl, UriKind.Absolute, out var msUri) || msUri.Scheme != Uri.UriSchemeHttps)
+                {
+                    tabControl.SelectedIndex = 2;
+                    MessageBox.Show(this, "L'URL Partner Center doit être une adresse HTTPS valide.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
+
             var confirm = MessageBox.Show(this,
-                "Le fichier exporté contiendra le Client Secret NinjaOne et la clé API Zyxel Nebula.\n\nCe fichier doit être conservé dans un emplacement sécurisé.\n\nVoulez-vous continuer ?",
+                "Le fichier exporté contiendra les secrets NinjaOne et Zyxel Nebula.\n\nCe fichier doit être conservé dans un emplacement sécurisé.\n\nVoulez-vous continuer ?",
                 "Exporter la configuration complète",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning,
@@ -324,7 +461,8 @@ namespace FdaLicenseControl
             var cfg = new FdaApplicationConfiguration
             {
                 NinjaOne = new NinjaOneSettings { BaseUrl = ninjaBaseUrl, ClientId = ninjaClientId, ClientSecret = ninjaClientSecret },
-                ZyxelNebula = new ZyxelNebulaSettings { BaseUrl = zyxelBaseUrl, ApiKey = zyxelApiKey }
+                ZyxelNebula = new ZyxelNebulaSettings { BaseUrl = zyxelBaseUrl, ApiKey = zyxelApiKey },
+                MicrosoftPartner = new MicrosoftPartnerSettings { PartnerTenantId = msPartnerTenantId, ClientId = msClientId, BaseUrl = msBaseUrl }
             };
 
             try
@@ -383,6 +521,77 @@ namespace FdaLicenseControl
             }
         }
 
+        private async void BtnMicrosoftTest_Click(object? sender, EventArgs e)
+        {
+            var partnerTenantId = txtMicrosoftPartnerTenantId.Text?.Trim() ?? string.Empty;
+            var clientId = txtMicrosoftClientId.Text?.Trim() ?? string.Empty;
+            var baseUrl = txtMicrosoftBaseUrl.Text?.Trim() ?? string.Empty;
+
+            if (baseUrl.EndsWith("/"))
+                baseUrl = baseUrl.Substring(0, baseUrl.Length - 1);
+
+            if (string.IsNullOrEmpty(baseUrl))
+                baseUrl = "https://api.partnercenter.microsoft.com";
+
+            if (string.IsNullOrEmpty(partnerTenantId) || string.IsNullOrEmpty(clientId))
+            {
+                tabControl.SelectedIndex = 2;
+                MessageBox.Show(this, "La configuration Microsoft 365 est incomplète.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!Guid.TryParse(partnerTenantId, out var tenantGuid) || tenantGuid == Guid.Empty)
+            {
+                tabControl.SelectedIndex = 2;
+                MessageBox.Show(this, "L'identifiant du tenant partenaire Microsoft n'est pas valide.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!Guid.TryParse(clientId, out var appGuid) || appGuid == Guid.Empty)
+            {
+                tabControl.SelectedIndex = 2;
+                MessageBox.Show(this, "L'identifiant de l'application Microsoft n'est pas valide.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+            {
+                tabControl.SelectedIndex = 2;
+                MessageBox.Show(this, "L'URL Partner Center doit être une adresse HTTPS valide.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            SetAllButtonsEnabled(false);
+            var previousCursor = this.UseWaitCursor;
+            this.UseWaitCursor = true;
+            var previousText = btnMicrosoftTest.Text;
+            btnMicrosoftTest.Text = "Connexion en cours...";
+
+            try
+            {
+                var service = new MicrosoftPartnerAuthenticationService();
+                var result = await service.TestConnectionAsync(partnerTenantId, clientId, baseUrl);
+
+                var complianceText = result.IsMfaCompliant == true ? "Oui" : "Non vérifiable";
+                MessageBox.Show(this,
+                    $"Connexion à Microsoft Partner Center réussie.\n\nCompte : {result.AccountName}\n\n{result.CustomerCount} client(s) accessible(s).\n\nConformité MFA : {complianceText}",
+                    "Test Microsoft 365 réussi",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Échec du test Microsoft 365", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                btnMicrosoftTest.Text = previousText;
+                this.UseWaitCursor = false;
+                Cursor = Cursors.Default;
+                SetAllButtonsEnabled(true);
+            }
+        }
+
         private async void BtnZyxelTest_Click(object? sender, EventArgs e)
         {
             var baseUrl = txtZyxelBaseUrl.Text?.Trim() ?? string.Empty;
@@ -430,6 +639,7 @@ namespace FdaLicenseControl
         {
             btnNinjaTest.Enabled = enabled;
             btnZyxelTest.Enabled = enabled;
+            btnMicrosoftTest.Enabled = enabled;
             if (btnImportAll != null) btnImportAll.Enabled = enabled;
             if (btnExportAll != null) btnExportAll.Enabled = enabled;
             btnSave.Enabled = enabled;

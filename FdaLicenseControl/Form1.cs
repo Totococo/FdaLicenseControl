@@ -13,11 +13,19 @@ namespace FdaLicenseControl
         private Label lblStatus;
         private Button btnDownloadDevices;
         private Button btnDownloadZyxel;
+        private Button btnDownloadMicrosoft365;
         private DataGridView dgvInventory;
         private DataGridView dgvZyxel;
+        private DataGridView dgvMicrosoft365;
         private ComboBox cmbHistory;
         private ComboBox cmbZyxelHistory;
+        private ComboBox cmbMicrosoftHistory;
         private Label lblZyxelStatus;
+        private Label lblMicrosoftStatus;
+        private TabControl mainTabControl;
+        private TabPage tabNinjaPage;
+        private TabPage tabZyxelPage;
+        private TabPage tabMicrosoftPage;
         private TableLayoutPanel mainLayout;
         private IReadOnlyList<NinjaOneClientInventory>? currentInventory;
         private readonly NinjaOneInventoryHistoryService _historyService = new NinjaOneInventoryHistoryService();
@@ -27,6 +35,10 @@ namespace FdaLicenseControl
         private bool _initialHistoryLoaded = false;
         private readonly ZyxelNebulaInventoryHistoryService _zyxelHistoryService = new ZyxelNebulaInventoryHistoryService();
         private bool _isUpdatingZyxelHistoryComboBox = false;
+        private bool _isMicrosoft365DownloadInProgress = false;
+        private readonly Microsoft365LicenseHistoryService _microsoft365HistoryService = new Microsoft365LicenseHistoryService();
+        private bool _isUpdatingMicrosoft365HistoryComboBox = false;
+        private readonly Microsoft365LicenseInventoryReader _microsoft365InventoryReader = new Microsoft365LicenseInventoryReader();
 
         // Tag used for each DataGridViewRow to store stable key and references
         private sealed class InventoryGridRowTag
@@ -49,6 +61,13 @@ namespace FdaLicenseControl
             public ZyxelNebulaSiteInventory? Site { get; init; }
 
             // Key used for highlighting persistence
+            public string HighlightKey { get; init; } = string.Empty;
+        }
+
+        private sealed class Microsoft365GridRowTag
+        {
+            public Microsoft365CustomerLicenseInventory Inventory { get; init; } = new Microsoft365CustomerLicenseInventory();
+
             public string HighlightKey { get; init; } = string.Empty;
         }
 
@@ -145,6 +164,91 @@ namespace FdaLicenseControl
             }
         }
 
+        private void DgvMicrosoft365_CellMouseClick(object? sender, DataGridViewCellMouseEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.RowIndex >= dgvMicrosoft365.Rows.Count)
+                return;
+
+            if (dgvMicrosoft365.Rows[e.RowIndex].Tag is not Microsoft365GridRowTag tag)
+                return;
+
+            if (string.IsNullOrWhiteSpace(tag.HighlightKey))
+                return;
+
+            if (_uiState.HighlightedRowKeys.Contains(tag.HighlightKey))
+                _uiState.HighlightedRowKeys.Remove(tag.HighlightKey);
+            else
+                _uiState.HighlightedRowKeys.Add(tag.HighlightKey);
+
+            try
+            {
+                _uiStateService.Save(_uiState);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Erreur sauvegarde état UI", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            ApplyMicrosoft365RowHighlight(dgvMicrosoft365.Rows[e.RowIndex], tag.HighlightKey);
+        }
+
+        private void PopulateMicrosoft365Grid(IReadOnlyList<Microsoft365CustomerLicenseInventory> inventories)
+        {
+            dgvMicrosoft365.Rows.Clear();
+            if (inventories == null)
+                return;
+
+            for (int i = 0; i < inventories.Count; i++)
+            {
+                var inventory = inventories[i];
+                var rowIndex = dgvMicrosoft365.Rows.Add();
+                var row = dgvMicrosoft365.Rows[rowIndex];
+                var key = BuildMicrosoft365HighlightKey(inventory);
+                row.Tag = new Microsoft365GridRowTag { Inventory = inventory, HighlightKey = key };
+                row.DefaultCellStyle.Font = new Font(dgvMicrosoft365.Font, FontStyle.Bold);
+                row.Cells[0].Value = inventory.CompanyName;
+                row.Cells[1].Value = inventory.BusinessBasicUsed;
+                row.Cells[2].Value = inventory.BusinessStandardUsed;
+                row.Cells[3].Value = inventory.ExchangeOnlinePlan1Used;
+                row.Cells[4].Value = inventory.TeamsEssentialsUsed;
+                row.Cells[5].Value = inventory.TotalUsed;
+                ApplyMicrosoft365RowHighlight(row, key);
+            }
+        }
+
+        private void ApplyMicrosoft365RowHighlight(DataGridViewRow row, string highlightKey)
+        {
+            var isHighlighted = !string.IsNullOrEmpty(highlightKey) && _uiState.HighlightedRowKeys.Contains(highlightKey);
+            if (isHighlighted)
+            {
+                row.DefaultCellStyle.BackColor = Color.LightGreen;
+                row.DefaultCellStyle.SelectionBackColor = Color.LightGreen;
+                row.DefaultCellStyle.ForeColor = Color.Black;
+                row.DefaultCellStyle.SelectionForeColor = Color.Black;
+                row.DefaultCellStyle.Font = new Font(dgvMicrosoft365.Font, FontStyle.Bold);
+            }
+            else
+            {
+                row.DefaultCellStyle.BackColor = dgvMicrosoft365.DefaultCellStyle.BackColor;
+                row.DefaultCellStyle.SelectionBackColor = SystemColors.Highlight;
+                row.DefaultCellStyle.ForeColor = dgvMicrosoft365.DefaultCellStyle.ForeColor;
+                row.DefaultCellStyle.SelectionForeColor = SystemColors.HighlightText;
+                row.DefaultCellStyle.Font = new Font(dgvMicrosoft365.Font, FontStyle.Bold);
+            }
+        }
+
+        private static string BuildMicrosoft365HighlightKey(Microsoft365CustomerLicenseInventory inventory)
+        {
+            if (!string.IsNullOrWhiteSpace(inventory.CustomerId))
+                return $"microsoft365:customer:{inventory.CustomerId.Trim()}";
+
+            if (!string.IsNullOrWhiteSpace(inventory.TenantId))
+                return $"microsoft365:customer:{inventory.TenantId.Trim()}";
+
+            var domain = inventory.Domain?.Trim().ToLowerInvariant() ?? string.Empty;
+            return $"microsoft365:customer:domain:{domain}";
+        }
+
         private void InitializeNinjaControls()
         {
             var historyPanel = new TableLayoutPanel
@@ -209,10 +313,11 @@ namespace FdaLicenseControl
 
             mainLayout.Controls.Add(topBar, 0, 0);
 
-            // create tab control for NinjaOne and Zyxel
-            var tab = new TabControl { Dock = DockStyle.Fill };
-            var tabNinja = new TabPage("NinjaOne");
-            var tabZyxel = new TabPage("Zyxel Nebula");
+            // create tab control for NinjaOne, Zyxel and Microsoft 365
+            mainTabControl = new TabControl { Dock = DockStyle.Fill };
+            tabNinjaPage = new TabPage("NinjaOne");
+            tabZyxelPage = new TabPage("Zyxel Nebula");
+            tabMicrosoftPage = new TabPage("Microsoft 365");
 
             // NinjaOne tab layout
             var ninjaLayout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
@@ -276,7 +381,7 @@ namespace FdaLicenseControl
             dgvInventory.CellMouseLeave += DgvInventory_CellMouseLeave;
 
             ninjaLayout.Controls.Add(dgvInventory, 0, 1);
-            tabNinja.Controls.Add(ninjaLayout);
+            tabNinjaPage.Controls.Add(ninjaLayout);
 
             // Zyxel tab layout
             var zyxelLayout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
@@ -341,12 +446,79 @@ namespace FdaLicenseControl
             dgvZyxel.CellMouseClick += ZyxelDataGridView_CellMouseClick;
 
             zyxelLayout.Controls.Add(dgvZyxel, 0, 1);
-            tabZyxel.Controls.Add(zyxelLayout);
+            tabZyxelPage.Controls.Add(zyxelLayout);
 
-            tab.TabPages.Add(tabNinja);
-            tab.TabPages.Add(tabZyxel);
+            // Microsoft 365 tab layout
+            var microsoftLayout = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = false, ColumnCount = 1, RowCount = 2 };
+            microsoftLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            microsoftLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
 
-            mainLayout.Controls.Add(tab, 0, 1);
+            var microsoftCommandBar = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                WrapContents = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                Padding = new Padding(8),
+                Margin = new Padding(4)
+            };
+
+            var lblMicrosoftHistory = new Label { Text = "Historique :", AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Top };
+            cmbMicrosoftHistory = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 320, Anchor = AnchorStyles.Left | AnchorStyles.Top };
+            cmbMicrosoftHistory.SelectedIndexChanged += CmbMicrosoftHistory_SelectedIndexChanged;
+            btnDownloadMicrosoft365 = new Button { Text = "Récupérer les licences Microsoft 365", AutoSize = true };
+            btnDownloadMicrosoft365.Click += BtnDownloadMicrosoft365_Click;
+            lblMicrosoftStatus = new Label { Text = string.Empty, AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right };
+            microsoftCommandBar.Controls.Add(lblMicrosoftHistory);
+            microsoftCommandBar.Controls.Add(cmbMicrosoftHistory);
+            microsoftCommandBar.Controls.Add(btnDownloadMicrosoft365);
+            microsoftCommandBar.Controls.Add(lblMicrosoftStatus);
+
+            dgvMicrosoft365 = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                RowHeadersVisible = false,
+                MultiSelect = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                AutoGenerateColumns = false,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None,
+                BackgroundColor = dgvInventory.BackgroundColor
+            };
+
+            var microsoftClientCol = new DataGridViewTextBoxColumn { Name = "MicrosoftClient", HeaderText = "Client", Width = 380, MinimumWidth = 250, SortMode = DataGridViewColumnSortMode.NotSortable };
+            var microsoftBasicCol = new DataGridViewTextBoxColumn { Name = "MicrosoftBasic", HeaderText = "Business Basic", Width = 145, MinimumWidth = 145, SortMode = DataGridViewColumnSortMode.NotSortable };
+            microsoftBasicCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
+            microsoftBasicCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            var microsoftStandardCol = new DataGridViewTextBoxColumn { Name = "MicrosoftStandard", HeaderText = "Business Standard", Width = 165, MinimumWidth = 165, SortMode = DataGridViewColumnSortMode.NotSortable };
+            microsoftStandardCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
+            microsoftStandardCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            var microsoftExchangeCol = new DataGridViewTextBoxColumn { Name = "MicrosoftExchange", HeaderText = "Exchange Online P1", Width = 165, MinimumWidth = 165, SortMode = DataGridViewColumnSortMode.NotSortable };
+            microsoftExchangeCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
+            microsoftExchangeCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            var microsoftTeamsCol = new DataGridViewTextBoxColumn { Name = "MicrosoftTeams", HeaderText = "Teams Essentials", Width = 150, MinimumWidth = 150, SortMode = DataGridViewColumnSortMode.NotSortable };
+            microsoftTeamsCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
+            microsoftTeamsCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            var microsoftTotalCol = new DataGridViewTextBoxColumn { Name = "MicrosoftTotal", HeaderText = "Total utilisé", Width = 120, MinimumWidth = 120, SortMode = DataGridViewColumnSortMode.NotSortable };
+            microsoftTotalCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
+            microsoftTotalCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+
+            dgvMicrosoft365.Columns.AddRange(new DataGridViewColumn[] { microsoftClientCol, microsoftBasicCol, microsoftStandardCol, microsoftExchangeCol, microsoftTeamsCol, microsoftTotalCol });
+            dgvMicrosoft365.CellMouseClick += DgvMicrosoft365_CellMouseClick;
+
+            microsoftLayout.Controls.Add(microsoftCommandBar, 0, 0);
+            microsoftLayout.Controls.Add(dgvMicrosoft365, 0, 1);
+            tabMicrosoftPage.Controls.Add(microsoftLayout);
+
+            mainTabControl.TabPages.Add(tabNinjaPage);
+            mainTabControl.TabPages.Add(tabZyxelPage);
+            mainTabControl.TabPages.Add(tabMicrosoftPage);
+
+            mainLayout.Controls.Add(mainTabControl, 0, 1);
             this.Controls.Add(mainLayout);
 
             UpdateStatusLabel();
@@ -472,6 +644,16 @@ namespace FdaLicenseControl
             await LoadZyxelHistoryItemAsync(item);
         }
 
+        private async void CmbMicrosoftHistory_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            if (_isUpdatingMicrosoft365HistoryComboBox)
+                return;
+            if (cmbMicrosoftHistory.SelectedItem is not Microsoft365LicenseHistoryItem item)
+                return;
+
+            await LoadMicrosoft365HistoryItemAsync(item);
+        }
+
         private async Task LoadHistoryItemAsync(NinjaOneInventoryHistoryItem item)
         {
             try
@@ -547,6 +729,7 @@ namespace FdaLicenseControl
                 await LoadHistoryAsync();
                 // load zyxel history after ninja
                 await LoadZyxelHistoryAsync();
+                await LoadMicrosoft365HistoryAsync();
             }
             catch
             {
@@ -597,6 +780,76 @@ namespace FdaLicenseControl
                         ApplyRowHighlight(rloc, locTag);
                     }
                 }
+            }
+
+        }
+
+        private async Task LoadMicrosoft365HistoryAsync(string? selectFilePath = null)
+        {
+            try
+            {
+                var items = await _microsoft365HistoryService.GetHistoryAsync();
+                _isUpdatingMicrosoft365HistoryComboBox = true;
+                cmbMicrosoftHistory.Items.Clear();
+                cmbMicrosoftHistory.DisplayMember = "DisplayText";
+                foreach (var item in items)
+                    cmbMicrosoftHistory.Items.Add(item);
+
+                if (cmbMicrosoftHistory.Items.Count == 0)
+                {
+                    lblMicrosoftStatus.Text = "Aucune extraction Microsoft 365 disponible.";
+                    dgvMicrosoft365.Rows.Clear();
+                }
+                else
+                {
+                    object? toSelect = null;
+                    if (!string.IsNullOrEmpty(selectFilePath))
+                        toSelect = items.FirstOrDefault(x => string.Equals(x.FilePath, selectFilePath, StringComparison.OrdinalIgnoreCase));
+                    if (toSelect == null)
+                        toSelect = cmbMicrosoftHistory.Items[0];
+                    cmbMicrosoftHistory.SelectedItem = toSelect;
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+            finally
+            {
+                _isUpdatingMicrosoft365HistoryComboBox = false;
+            }
+
+            try
+            {
+                if (cmbMicrosoftHistory.Items.Count > 0 && cmbMicrosoftHistory.SelectedItem is Microsoft365LicenseHistoryItem selected)
+                    await LoadMicrosoft365HistoryItemAsync(selected);
+            }
+            catch (Exception ex)
+            {
+                lblMicrosoftStatus.Text = "Impossible de charger la dernière extraction Microsoft 365.";
+                MessageBox.Show(this, ex.Message, "Erreur lecture historique Microsoft 365", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async Task LoadMicrosoft365HistoryItemAsync(Microsoft365LicenseHistoryItem item)
+        {
+            try
+            {
+                var inventories = await _microsoft365InventoryReader.ReadAsync(item.FilePath);
+                PopulateMicrosoft365Grid(inventories);
+
+            var totalBasic = inventories.Sum(x => x.BusinessBasicUsed);
+            var totalStandard = inventories.Sum(x => x.BusinessStandardUsed);
+            var totalExchange = inventories.Sum(x => x.ExchangeOnlinePlan1Used);
+            var totalTeams = inventories.Sum(x => x.TeamsEssentialsUsed);
+            var totalGlobal = inventories.Sum(x => x.TotalUsed);
+
+            lblMicrosoftStatus.Text = $"{item.RetrievedAtUtc.ToLocalTime():dd/MM/yyyy HH:mm} — {inventories.Count} clients — {totalBasic} Business Basic — {totalStandard} Business Standard — {totalExchange} Exchange Online P1 — {totalTeams} Teams Essentials — {totalGlobal} licences utilisées";
+            }
+            catch (Exception ex)
+            {
+                lblMicrosoftStatus.Text = "Impossible de charger l'extraction Microsoft 365.";
+                MessageBox.Show(this, ex.Message, "Erreur lecture historique Microsoft 365", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -874,6 +1127,86 @@ namespace FdaLicenseControl
         {
             using var f = new ApplicationSettingsForm();
             f.ShowDialog(this);
+        }
+
+        private async void BtnDownloadMicrosoft365_Click(object? sender, EventArgs e)
+        {
+            if (_isMicrosoft365DownloadInProgress)
+            {
+                return;
+            }
+
+            _isMicrosoft365DownloadInProgress = true;
+            try
+            {
+                var confirm = MessageBox.Show(this,
+                    "Une nouvelle extraction des licences Microsoft 365 va être lancée.\n\nLes anciennes extractions seront conservées.\n\nUne fenêtre de connexion Microsoft pourra s’ouvrir.\n\nVoulez-vous continuer ?",
+                    "Nouvelle extraction Microsoft 365",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button2);
+
+                if (confirm != DialogResult.Yes)
+                    return;
+
+                if (!MicrosoftPartnerSettingsService.IsConfigured())
+                {
+                    using var settingsForm = new ApplicationSettingsForm();
+                    settingsForm.ShowDialog(this);
+                    if (!MicrosoftPartnerSettingsService.IsConfigured())
+                        return;
+                }
+
+                btnSettings.Enabled = false;
+                btnDownloadDevices.Enabled = false;
+                btnDownloadZyxel.Enabled = false;
+                btnDownloadMicrosoft365.Enabled = false;
+                cmbHistory.Enabled = false;
+                cmbZyxelHistory.Enabled = false;
+                this.UseWaitCursor = true;
+                this.Cursor = Cursors.WaitCursor;
+                dgvInventory.UseWaitCursor = true;
+                dgvInventory.Cursor = Cursors.WaitCursor;
+                dgvZyxel.UseWaitCursor = true;
+                dgvZyxel.Cursor = Cursors.WaitCursor;
+                lblMicrosoftStatus.Text = "Connexion à Microsoft Partner Center...";
+
+                var progress = new Progress<string>(message => lblMicrosoftStatus.Text = message);
+
+                var client = new MicrosoftPartnerLicenseInventoryApiClient();
+                var result = await client.DownloadAllAsync(progress);
+
+                lblMicrosoftStatus.Text = $"{result.ProcessedCustomerCount} clients traités — {result.SkippedCustomerCount} ignorés — {result.SubscribedSkuCount} références de licences.";
+
+                await LoadMicrosoft365HistoryAsync(result.FilePath);
+
+                var messageBoxIcon = result.SkippedCustomerCount > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
+                MessageBox.Show(this,
+                    $"{result.CustomerCount} client(s) Partner Center ont été trouvés.\n\n{result.ProcessedCustomerCount} client(s) ont été traités.\n\n{result.SkippedCustomerCount} client(s) ont été ignorés.\n\n{result.SubscribedSkuCount} référence(s) de licences ont été récupérées.\n\nFichier :\n{result.FilePath}",
+                    "Extraction Microsoft 365 terminée",
+                    MessageBoxButtons.OK,
+                    messageBoxIcon);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Erreur Microsoft 365", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                _isMicrosoft365DownloadInProgress = false;
+                btnSettings.Enabled = true;
+                btnDownloadDevices.Enabled = true;
+                btnDownloadZyxel.Enabled = true;
+                btnDownloadMicrosoft365.Enabled = true;
+                cmbHistory.Enabled = true;
+                cmbZyxelHistory.Enabled = true;
+                this.UseWaitCursor = false;
+                this.Cursor = Cursors.Default;
+                dgvInventory.UseWaitCursor = false;
+                dgvInventory.Cursor = Cursors.Default;
+                dgvZyxel.UseWaitCursor = false;
+                dgvZyxel.Cursor = Cursors.Default;
+            }
         }
 
         private void UpdateStatusLabel()
