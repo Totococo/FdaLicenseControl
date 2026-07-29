@@ -14,6 +14,7 @@ namespace FdaLicenseControl
         private Button btnDownloadDevices;
         private Button btnDownloadZyxel;
         private Button btnDownloadMicrosoft365;
+        private Button btnTestMicrosoftGraphAssociationDuMay;
         private DataGridView dgvInventory;
         private DataGridView dgvZyxel;
         private DataGridView dgvMicrosoft365;
@@ -36,9 +37,13 @@ namespace FdaLicenseControl
         private readonly ZyxelNebulaInventoryHistoryService _zyxelHistoryService = new ZyxelNebulaInventoryHistoryService();
         private bool _isUpdatingZyxelHistoryComboBox = false;
         private bool _isMicrosoft365DownloadInProgress = false;
+        private bool _isMicrosoftGraphTestInProgress = false;
         private readonly Microsoft365LicenseHistoryService _microsoft365HistoryService = new Microsoft365LicenseHistoryService();
         private bool _isUpdatingMicrosoft365HistoryComboBox = false;
         private readonly Microsoft365LicenseInventoryReader _microsoft365InventoryReader = new Microsoft365LicenseInventoryReader();
+        private IReadOnlyList<Microsoft365CustomerLicenseInventory>? _microsoft365Inventories;
+        private readonly HashSet<string> _expandedMicrosoft365ClientKeys = new(StringComparer.OrdinalIgnoreCase);
+        private const string AssociationDuMayTenantId = "73deff26-8b73-4073-ae23-1fb9800caa12";
 
         // Tag used for each DataGridViewRow to store stable key and references
         private sealed class InventoryGridRowTag
@@ -66,9 +71,19 @@ namespace FdaLicenseControl
 
         private sealed class Microsoft365GridRowTag
         {
-            public Microsoft365CustomerLicenseInventory Inventory { get; init; } = new Microsoft365CustomerLicenseInventory();
+            public bool IsClient { get; init; }
+
+            public bool HasChildren { get; init; }
+
+            public string CustomerKey { get; init; } = string.Empty;
+
+            public string OfficeLocation { get; init; } = string.Empty;
 
             public string HighlightKey { get; init; } = string.Empty;
+
+            public Microsoft365CustomerLicenseInventory Inventory { get; init; } = new Microsoft365CustomerLicenseInventory();
+
+            public Microsoft365OfficeLicenseInventory? Office { get; init; }
         }
 
         // in-memory list of last loaded Zyxel clients (preserve IsExpanded)
@@ -175,6 +190,12 @@ namespace FdaLicenseControl
             if (string.IsNullOrWhiteSpace(tag.HighlightKey))
                 return;
 
+            if (tag.IsClient && tag.HasChildren && !string.IsNullOrWhiteSpace(tag.CustomerKey) && e.ColumnIndex == 0 && e.X < 28)
+            {
+                ToggleMicrosoft365Expansion(tag.CustomerKey);
+                return;
+            }
+
             if (_uiState.HighlightedRowKeys.Contains(tag.HighlightKey))
                 _uiState.HighlightedRowKeys.Remove(tag.HighlightKey);
             else
@@ -194,6 +215,7 @@ namespace FdaLicenseControl
 
         private void PopulateMicrosoft365Grid(IReadOnlyList<Microsoft365CustomerLicenseInventory> inventories)
         {
+            _microsoft365Inventories = inventories;
             dgvMicrosoft365.Rows.Clear();
             if (inventories == null)
                 return;
@@ -201,19 +223,19 @@ namespace FdaLicenseControl
             for (int i = 0; i < inventories.Count; i++)
             {
                 var inventory = inventories[i];
-                var rowIndex = dgvMicrosoft365.Rows.Add();
-                var row = dgvMicrosoft365.Rows[rowIndex];
                 var key = BuildMicrosoft365HighlightKey(inventory);
-                row.Tag = new Microsoft365GridRowTag { Inventory = inventory, HighlightKey = key };
-                row.DefaultCellStyle.Font = new Font(dgvMicrosoft365.Font, FontStyle.Bold);
-                row.Cells[0].Value = inventory.CompanyName;
-                row.Cells[1].Value = inventory.BusinessBasicUsed;
-                row.Cells[2].Value = inventory.BusinessStandardUsed;
-                row.Cells[3].Value = inventory.ExchangeOnlinePlan1Used;
-                row.Cells[4].Value = inventory.TeamsEssentialsUsed;
-                row.Cells[5].Value = inventory.TotalUsed;
-                ApplyMicrosoft365RowHighlight(row, key);
+                var hasChildren = inventory.Offices != null && inventory.Offices.Count > 0;
+                var isExpanded = hasChildren && _expandedMicrosoft365ClientKeys.Contains(GetMicrosoft365ExpansionKey(inventory));
+                AddMicrosoft365ClientRow(inventory, hasChildren, key);
+
+                if (hasChildren && isExpanded)
+                {
+                    foreach (var office in inventory.Offices)
+                        AddMicrosoft365OfficeRow(inventory, office);
+                }
             }
+
+            ApplyMicrosoft365GridState();
         }
 
         private void ApplyMicrosoft365RowHighlight(DataGridViewRow row, string highlightKey)
@@ -237,13 +259,117 @@ namespace FdaLicenseControl
             }
         }
 
+        private void ApplyMicrosoft365GridState()
+        {
+            for (int i = 0; i < dgvMicrosoft365.Rows.Count; i++)
+            {
+                if (dgvMicrosoft365.Rows[i].Tag is Microsoft365GridRowTag tag)
+                    ApplyMicrosoft365RowHighlight(dgvMicrosoft365.Rows[i], tag.HighlightKey);
+            }
+
+            dgvMicrosoft365.ClearSelection();
+            this.UseWaitCursor = false;
+            this.Cursor = Cursors.Default;
+            dgvMicrosoft365.UseWaitCursor = false;
+            dgvMicrosoft365.Cursor = Cursors.Default;
+        }
+
+        private void AddMicrosoft365ClientRow(Microsoft365CustomerLicenseInventory inventory, bool hasChildren, string highlightKey)
+        {
+            var rowIndex = dgvMicrosoft365.Rows.Add();
+            var row = dgvMicrosoft365.Rows[rowIndex];
+            var tag = new Microsoft365GridRowTag
+            {
+                IsClient = true,
+                HasChildren = hasChildren,
+                CustomerKey = GetMicrosoft365ExpansionKey(inventory),
+                HighlightKey = highlightKey,
+                Inventory = inventory
+            };
+
+            row.Tag = tag;
+            row.DefaultCellStyle.Font = new Font(dgvMicrosoft365.Font, FontStyle.Bold);
+            row.Cells[0].Value = hasChildren
+                ? (_expandedMicrosoft365ClientKeys.Contains(tag.CustomerKey) ? "▼ " + inventory.CompanyName : "▶ " + inventory.CompanyName)
+                : inventory.CompanyName;
+            row.Cells[1].Value = inventory.BusinessBasicUsed;
+            row.Cells[2].Value = inventory.BusinessStandardUsed;
+            row.Cells[3].Value = inventory.ExchangeOnlinePlan1Used;
+            row.Cells[4].Value = inventory.TeamsEssentialsUsed;
+            row.Cells[5].Value = inventory.TotalUsed;
+            row.Cells[0].ToolTipText = hasChildren
+                ? (string.Equals(inventory.GraphStatus, "Success", StringComparison.OrdinalIgnoreCase)
+                    ? "Détails par bureau disponibles."
+                    : "Détails par bureau indisponibles : autorisation Microsoft Graph requise.")
+                : string.Empty;
+        }
+
+        private void AddMicrosoft365OfficeRow(Microsoft365CustomerLicenseInventory inventory, Microsoft365OfficeLicenseInventory office)
+        {
+            var rowIndex = dgvMicrosoft365.Rows.Add();
+            var row = dgvMicrosoft365.Rows[rowIndex];
+            var officeKey = GetMicrosoft365OfficeKey(inventory, office.OfficeLocation);
+            row.Tag = new Microsoft365GridRowTag
+            {
+                IsClient = false,
+                HasChildren = false,
+                CustomerKey = GetMicrosoft365ExpansionKey(inventory),
+                OfficeLocation = office.OfficeLocation,
+                HighlightKey = officeKey,
+                Inventory = inventory,
+                Office = office
+            };
+
+            row.DefaultCellStyle.Font = new Font(dgvMicrosoft365.Font, FontStyle.Regular);
+            row.Cells[0].Value = "    ↳ " + office.OfficeLocation;
+            row.Cells[1].Value = office.BusinessBasicUsed;
+            row.Cells[2].Value = office.BusinessStandardUsed;
+            row.Cells[3].Value = office.ExchangeOnlinePlan1Used;
+            row.Cells[4].Value = office.TeamsEssentialsUsed;
+            row.Cells[5].Value = office.TotalUsed;
+        }
+
+        private void ToggleMicrosoft365Expansion(string tenantId)
+        {
+            if (string.IsNullOrWhiteSpace(tenantId))
+                return;
+
+            if (_expandedMicrosoft365ClientKeys.Contains(tenantId))
+                _expandedMicrosoft365ClientKeys.Remove(tenantId);
+            else
+                _expandedMicrosoft365ClientKeys.Add(tenantId);
+
+            if (_microsoft365Inventories != null)
+                PopulateMicrosoft365Grid(_microsoft365Inventories);
+        }
+
+        private static string GetMicrosoft365ExpansionKey(Microsoft365CustomerLicenseInventory inventory)
+        {
+            var tenantId = inventory.TenantId;
+            if (!string.IsNullOrWhiteSpace(tenantId))
+                return tenantId.Trim();
+
+            if (!string.IsNullOrWhiteSpace(inventory.CustomerId))
+                return inventory.CustomerId.Trim();
+
+            return string.Empty;
+        }
+
+        private static string GetMicrosoft365OfficeKey(Microsoft365CustomerLicenseInventory inventory, string officeLocation)
+        {
+            var tenantId = GetMicrosoft365ExpansionKey(inventory);
+            var normalizedOfficeLocation = string.IsNullOrWhiteSpace(officeLocation) ? "Sans bureau" : officeLocation.Trim();
+            return $"microsoft365:office:{tenantId}:{normalizedOfficeLocation}";
+        }
+
         private static string BuildMicrosoft365HighlightKey(Microsoft365CustomerLicenseInventory inventory)
         {
             if (!string.IsNullOrWhiteSpace(inventory.CustomerId))
                 return $"microsoft365:customer:{inventory.CustomerId.Trim()}";
 
-            if (!string.IsNullOrWhiteSpace(inventory.TenantId))
-                return $"microsoft365:customer:{inventory.TenantId.Trim()}";
+            var tenantId = inventory.TenantId;
+            if (!string.IsNullOrWhiteSpace(tenantId))
+                return $"microsoft365:customer:{tenantId.Trim()}";
 
             var domain = inventory.Domain?.Trim().ToLowerInvariant() ?? string.Empty;
             return $"microsoft365:customer:domain:{domain}";
@@ -469,10 +595,13 @@ namespace FdaLicenseControl
             cmbMicrosoftHistory.SelectedIndexChanged += CmbMicrosoftHistory_SelectedIndexChanged;
             btnDownloadMicrosoft365 = new Button { Text = "Récupérer les licences Microsoft 365", AutoSize = true };
             btnDownloadMicrosoft365.Click += BtnDownloadMicrosoft365_Click;
+            btnTestMicrosoftGraphAssociationDuMay = new Button { Text = "Tester Graph — Association du May", AutoSize = true };
+            btnTestMicrosoftGraphAssociationDuMay.Click += BtnTestMicrosoftGraphAssociationDuMay_Click;
             lblMicrosoftStatus = new Label { Text = string.Empty, AutoSize = true, Anchor = AnchorStyles.Left | AnchorStyles.Right };
             microsoftCommandBar.Controls.Add(lblMicrosoftHistory);
             microsoftCommandBar.Controls.Add(cmbMicrosoftHistory);
             microsoftCommandBar.Controls.Add(btnDownloadMicrosoft365);
+            microsoftCommandBar.Controls.Add(btnTestMicrosoftGraphAssociationDuMay);
             microsoftCommandBar.Controls.Add(lblMicrosoftStatus);
 
             dgvMicrosoft365 = new DataGridView
@@ -490,20 +619,20 @@ namespace FdaLicenseControl
                 BackgroundColor = dgvInventory.BackgroundColor
             };
 
-            var microsoftClientCol = new DataGridViewTextBoxColumn { Name = "MicrosoftClient", HeaderText = "Client", Width = 380, MinimumWidth = 250, SortMode = DataGridViewColumnSortMode.NotSortable };
-            var microsoftBasicCol = new DataGridViewTextBoxColumn { Name = "MicrosoftBasic", HeaderText = "Business Basic", Width = 145, MinimumWidth = 145, SortMode = DataGridViewColumnSortMode.NotSortable };
+            var microsoftClientCol = new DataGridViewTextBoxColumn { Name = "MicrosoftClient", HeaderText = "Client", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 250, SortMode = DataGridViewColumnSortMode.NotSortable };
+            var microsoftBasicCol = new DataGridViewTextBoxColumn { Name = "MicrosoftBasic", HeaderText = "Business Basic", Width = 120, MinimumWidth = 105, SortMode = DataGridViewColumnSortMode.NotSortable };
             microsoftBasicCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
             microsoftBasicCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            var microsoftStandardCol = new DataGridViewTextBoxColumn { Name = "MicrosoftStandard", HeaderText = "Business Standard", Width = 165, MinimumWidth = 165, SortMode = DataGridViewColumnSortMode.NotSortable };
+            var microsoftStandardCol = new DataGridViewTextBoxColumn { Name = "MicrosoftStandard", HeaderText = "Business Standard", Width = 125, MinimumWidth = 105, SortMode = DataGridViewColumnSortMode.NotSortable };
             microsoftStandardCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
             microsoftStandardCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            var microsoftExchangeCol = new DataGridViewTextBoxColumn { Name = "MicrosoftExchange", HeaderText = "Exchange Online P1", Width = 165, MinimumWidth = 165, SortMode = DataGridViewColumnSortMode.NotSortable };
+            var microsoftExchangeCol = new DataGridViewTextBoxColumn { Name = "MicrosoftExchange", HeaderText = "Exchange Online P1", Width = 125, MinimumWidth = 105, SortMode = DataGridViewColumnSortMode.NotSortable };
             microsoftExchangeCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
             microsoftExchangeCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            var microsoftTeamsCol = new DataGridViewTextBoxColumn { Name = "MicrosoftTeams", HeaderText = "Teams Essentials", Width = 150, MinimumWidth = 150, SortMode = DataGridViewColumnSortMode.NotSortable };
+            var microsoftTeamsCol = new DataGridViewTextBoxColumn { Name = "MicrosoftTeams", HeaderText = "Teams Essentials", Width = 120, MinimumWidth = 105, SortMode = DataGridViewColumnSortMode.NotSortable };
             microsoftTeamsCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
             microsoftTeamsCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            var microsoftTotalCol = new DataGridViewTextBoxColumn { Name = "MicrosoftTotal", HeaderText = "Total utilisé", Width = 120, MinimumWidth = 120, SortMode = DataGridViewColumnSortMode.NotSortable };
+            var microsoftTotalCol = new DataGridViewTextBoxColumn { Name = "MicrosoftTotal", HeaderText = "Total utilisé", Width = 110, MinimumWidth = 105, SortMode = DataGridViewColumnSortMode.NotSortable };
             microsoftTotalCol.DefaultCellStyle = new DataGridViewCellStyle { Alignment = DataGridViewContentAlignment.MiddleCenter };
             microsoftTotalCol.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
 
@@ -566,13 +695,89 @@ namespace FdaLicenseControl
                 {
                     await LoadHistoryItemAsync(sel);
                 }
-
             }
             catch (Exception ex)
             {
                 // show status and error but do not crash
                 lblStatus.Text = "Impossible de charger la dernière extraction.";
                 MessageBox.Show(this, ex.Message, "Erreur lecture historique", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async void BtnTestMicrosoftGraphAssociationDuMay_Click(object? sender, EventArgs e)
+        {
+            if (_isMicrosoftGraphTestInProgress)
+            {
+                return;
+            }
+
+            var confirm = MessageBox.Show(this,
+                "Le test va récupérer les utilisateurs, les bureaux et les licences attribuées du tenant Association du May.\n\nVoulez-vous continuer ?",
+                "Test Microsoft Graph",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2);
+
+            if (confirm != DialogResult.Yes)
+                return;
+
+            _isMicrosoftGraphTestInProgress = true;
+            try
+            {
+                btnSettings.Enabled = false;
+                btnDownloadDevices.Enabled = false;
+                btnDownloadZyxel.Enabled = false;
+                btnDownloadMicrosoft365.Enabled = false;
+                btnTestMicrosoftGraphAssociationDuMay.Enabled = false;
+                cmbHistory.Enabled = false;
+                cmbZyxelHistory.Enabled = false;
+                cmbMicrosoftHistory.Enabled = false;
+                this.UseWaitCursor = true;
+                this.Cursor = Cursors.WaitCursor;
+                dgvInventory.UseWaitCursor = true;
+                dgvInventory.Cursor = Cursors.WaitCursor;
+                dgvZyxel.UseWaitCursor = true;
+                dgvZyxel.Cursor = Cursors.WaitCursor;
+                dgvMicrosoft365.UseWaitCursor = true;
+                dgvMicrosoft365.Cursor = Cursors.WaitCursor;
+                lblMicrosoftStatus.Text = "Connexion à Microsoft Graph pour Association du May...";
+
+                var progress = new Progress<string>(message => lblMicrosoftStatus.Text = message);
+                var service = new MicrosoftGraphCustomerUserTestService();
+                var result = await service.TestAsync(AssociationDuMayTenantId, this.Handle, progress);
+
+                var summary = $"Connexion à Microsoft Graph réussie. Compte : {result.AccountName} — Utilisateurs : {result.UserCount} — Utilisateurs avec licence : {result.LicensedUserCount} — Utilisateurs avec bureau renseigné : {result.UserWithOfficeCount} — Bureaux distincts : {result.OfficeCount} — Affectations de licences : {result.AssignedLicenseCount}";
+                lblMicrosoftStatus.Text = summary;
+
+                MessageBox.Show(this,
+                    $"Connexion à Microsoft Graph réussie.\n\nCompte : {result.AccountName}\n\nUtilisateurs : {result.UserCount}\n\nUtilisateurs avec licence : {result.LicensedUserCount}\n\nUtilisateurs avec bureau renseigné : {result.UserWithOfficeCount}\n\nBureaux distincts : {result.OfficeCount}\n\nAffectations de licences : {result.AssignedLicenseCount}\n\nFichier :\n{result.FilePath}",
+                    "Test Microsoft Graph réussi",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Erreur Microsoft Graph", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                _isMicrosoftGraphTestInProgress = false;
+                btnSettings.Enabled = true;
+                btnDownloadDevices.Enabled = true;
+                btnDownloadZyxel.Enabled = true;
+                btnDownloadMicrosoft365.Enabled = true;
+                btnTestMicrosoftGraphAssociationDuMay.Enabled = true;
+                cmbHistory.Enabled = true;
+                cmbZyxelHistory.Enabled = true;
+                cmbMicrosoftHistory.Enabled = true;
+                this.UseWaitCursor = false;
+                this.Cursor = Cursors.Default;
+                dgvInventory.UseWaitCursor = false;
+                dgvInventory.Cursor = Cursors.Default;
+                dgvZyxel.UseWaitCursor = false;
+                dgvZyxel.Cursor = Cursors.Default;
+                dgvMicrosoft365.UseWaitCursor = false;
+                dgvMicrosoft365.Cursor = Cursors.Default;
             }
         }
 
@@ -838,13 +1043,16 @@ namespace FdaLicenseControl
                 var inventories = await _microsoft365InventoryReader.ReadAsync(item.FilePath);
                 PopulateMicrosoft365Grid(inventories);
 
-            var totalBasic = inventories.Sum(x => x.BusinessBasicUsed);
-            var totalStandard = inventories.Sum(x => x.BusinessStandardUsed);
-            var totalExchange = inventories.Sum(x => x.ExchangeOnlinePlan1Used);
-            var totalTeams = inventories.Sum(x => x.TeamsEssentialsUsed);
-            var totalGlobal = inventories.Sum(x => x.TotalUsed);
+                var totalBasic = inventories.Sum(x => x.BusinessBasicUsed);
+                var totalStandard = inventories.Sum(x => x.BusinessStandardUsed);
+                var totalExchange = inventories.Sum(x => x.ExchangeOnlinePlan1Used);
+                var totalTeams = inventories.Sum(x => x.TeamsEssentialsUsed);
+                var totalGlobal = inventories.Sum(x => x.TotalUsed);
+                var clientsWithDetails = inventories.Count(x => x.Offices != null && x.Offices.Count > 0);
+                var clientsWithoutGraph = inventories.Count(x => !string.Equals(x.GraphStatus, "Success", StringComparison.OrdinalIgnoreCase));
+                var officesTotal = inventories.Sum(x => x.Offices?.Count ?? 0);
 
-            lblMicrosoftStatus.Text = $"{item.RetrievedAtUtc.ToLocalTime():dd/MM/yyyy HH:mm} — {inventories.Count} clients — {totalBasic} Business Basic — {totalStandard} Business Standard — {totalExchange} Exchange Online P1 — {totalTeams} Teams Essentials — {totalGlobal} licences utilisées";
+                lblMicrosoftStatus.Text = $"{item.RetrievedAtUtc.ToLocalTime():dd/MM/yyyy HH:mm} — {inventories.Count} clients — {totalBasic} Business Basic — {totalStandard} Business Standard — {totalExchange} Exchange Online P1 — {totalTeams} Teams Essentials — {totalGlobal} licences utilisées — {clientsWithDetails} client(s) avec détails par bureau — {clientsWithoutGraph} client(s) sans accès Graph — {officesTotal} bureau(x)";
             }
             catch (Exception ex)
             {
@@ -1174,15 +1382,15 @@ namespace FdaLicenseControl
                 var progress = new Progress<string>(message => lblMicrosoftStatus.Text = message);
 
                 var client = new MicrosoftPartnerLicenseInventoryApiClient();
-                var result = await client.DownloadAllAsync(progress);
+                var result = await client.DownloadAllAsync(this.Handle, progress, CancellationToken.None);
 
-                lblMicrosoftStatus.Text = $"{result.ProcessedCustomerCount} clients traités — {result.SkippedCustomerCount} ignorés — {result.SubscribedSkuCount} références de licences.";
+                lblMicrosoftStatus.Text = $"{result.ProcessedCustomerCount} clients traités — {result.SkippedCustomerCount} ignorés — {result.SubscribedSkuCount} références de licences — Microsoft Graph : {result.GraphProcessedCustomerCount} client(s) traité(s), {result.GraphSkippedCustomerCount} client(s) non accessible(s), {result.GraphUserCount} utilisateur(s) récupéré(s), {result.GraphOfficeCount} bureau(x) trouvé(s).";
 
                 await LoadMicrosoft365HistoryAsync(result.FilePath);
 
                 var messageBoxIcon = result.SkippedCustomerCount > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information;
                 MessageBox.Show(this,
-                    $"{result.CustomerCount} client(s) Partner Center ont été trouvés.\n\n{result.ProcessedCustomerCount} client(s) ont été traités.\n\n{result.SkippedCustomerCount} client(s) ont été ignorés.\n\n{result.SubscribedSkuCount} référence(s) de licences ont été récupérées.\n\nFichier :\n{result.FilePath}",
+                    $"{result.CustomerCount} client(s) Partner Center ont été trouvés.\n\n{result.ProcessedCustomerCount} client(s) ont été traités.\n\n{result.SkippedCustomerCount} client(s) ont été ignorés.\n\n{result.SubscribedSkuCount} référence(s) de licences ont été récupérées.\n\nMicrosoft Graph :\n\n{result.GraphProcessedCustomerCount} client(s) traité(s).\n\n{result.GraphSkippedCustomerCount} client(s) non accessible(s).\n\n{result.GraphUserCount} utilisateur(s) récupéré(s).\n\n{result.GraphOfficeCount} bureau(x) trouvé(s).\n\nFichier :\n{result.FilePath}",
                     "Extraction Microsoft 365 terminée",
                     MessageBoxButtons.OK,
                     messageBoxIcon);

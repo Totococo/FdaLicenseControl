@@ -34,9 +34,10 @@ namespace FdaLicenseControl.Services
         internal async Task<MicrosoftPartnerTokenContext> AcquireTokenContextAsync(
             string partnerTenantId,
             string clientId,
+            IntPtr parentWindowHandle,
             CancellationToken cancellationToken = default)
         {
-            var authResult = await AcquireTokenAsync(partnerTenantId, clientId, cancellationToken);
+            var authResult = await AcquireTokenAsync(partnerTenantId, clientId, parentWindowHandle, cancellationToken);
             return new MicrosoftPartnerTokenContext
             {
                 AccessToken = authResult.AccessToken,
@@ -48,6 +49,7 @@ namespace FdaLicenseControl.Services
             string partnerTenantId,
             string clientId,
             string baseUrl,
+            IntPtr parentWindowHandle,
             CancellationToken cancellationToken = default)
         {
             var tenantId = partnerTenantId?.Trim() ?? string.Empty;
@@ -69,7 +71,7 @@ namespace FdaLicenseControl.Services
             if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme != "https")
                 throw new InvalidOperationException("L'URL Partner Center doit être une URL HTTPS absolue.");
 
-            var tokenContext = await AcquireTokenContextAsync(tenantId, appClientId, cancellationToken);
+            var tokenContext = await AcquireTokenContextAsync(tenantId, appClientId, parentWindowHandle, cancellationToken);
             var accessToken = tokenContext.AccessToken;
             var accountName = tokenContext.AccountName;
             var correlationId = Guid.NewGuid();
@@ -239,6 +241,7 @@ namespace FdaLicenseControl.Services
         private static async Task<AuthenticationResult> AcquireTokenAsync(
             string partnerTenantId,
             string clientId,
+            IntPtr parentWindowHandle,
             CancellationToken cancellationToken)
         {
             var tenantId = partnerTenantId?.Trim() ?? string.Empty;
@@ -253,11 +256,10 @@ namespace FdaLicenseControl.Services
             if (!Guid.TryParse(appClientId, out var clientGuid) || clientGuid == Guid.Empty)
                 throw new InvalidOperationException("L'identifiant de l'application Microsoft n'est pas valide.");
 
-            var app = PublicClientApplicationBuilder
-                .Create(appClientId)
-                .WithAuthority($"https://login.microsoftonline.com/{tenantId}")
-                .WithRedirectUri("http://localhost")
-                .Build();
+            var app = MicrosoftPublicClientApplicationFactory.Create(
+                appClientId,
+                $"https://login.microsoftonline.com/{tenantId}",
+                parentWindowHandle);
 
             var scopes = new[] { CustomerScope };
 
@@ -265,6 +267,7 @@ namespace FdaLicenseControl.Services
             {
                 var accounts = await app.GetAccountsAsync();
                 var firstAccount = accounts.FirstOrDefault();
+                var operatingSystemAccount = PublicClientApplication.OperatingSystemAccount;
 
                 if (firstAccount != null)
                 {
@@ -276,13 +279,23 @@ namespace FdaLicenseControl.Services
                     catch (MsalUiRequiredException)
                     {
                         return await app.AcquireTokenInteractive(scopes)
-                            .WithSystemWebViewOptions(new SystemWebViewOptions())
                             .ExecuteAsync(cancellationToken);
                     }
                 }
 
+                if (operatingSystemAccount != null)
+                {
+                    try
+                    {
+                        return await app.AcquireTokenSilent(scopes, operatingSystemAccount)
+                            .ExecuteAsync(cancellationToken);
+                    }
+                    catch (MsalUiRequiredException)
+                    {
+                    }
+                }
+
                 return await app.AcquireTokenInteractive(scopes)
-                    .WithSystemWebViewOptions(new SystemWebViewOptions())
                     .ExecuteAsync(cancellationToken);
             }
             catch (MsalException ex)

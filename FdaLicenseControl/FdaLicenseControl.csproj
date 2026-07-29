@@ -10,6 +10,8 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Identity.Client" Version="4.86.1" />
+    <PackageReference Include="Microsoft.Identity.Client.Desktop" Version="4.86.1" />
+    <PackageReference Include="Microsoft.Identity.Client.Broker" Version="4.86.1" />
   </ItemGroup>
 
 </Project>

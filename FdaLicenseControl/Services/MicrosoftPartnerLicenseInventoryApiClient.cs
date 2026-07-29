@@ -19,6 +19,7 @@ namespace FdaLicenseControl.Services
         private static readonly HttpClient HttpClient = new HttpClient();
 
         public async Task<Microsoft365LicenseDownloadResult> DownloadAllAsync(
+            IntPtr parentWindowHandle,
             IProgress<string>? progress = null,
             CancellationToken cancellationToken = default)
         {
@@ -33,7 +34,9 @@ namespace FdaLicenseControl.Services
                 baseUrl = "https://api.partnercenter.microsoft.com";
 
             var authService = new MicrosoftPartnerAuthenticationService();
-            MicrosoftPartnerTokenContext tokenContext = await authService.AcquireTokenContextAsync(partnerTenantId, clientId, cancellationToken);
+            MicrosoftPartnerTokenContext tokenContext = await authService.AcquireTokenContextAsync(partnerTenantId, clientId, parentWindowHandle, cancellationToken);
+            var graphService = new MicrosoftGraphCustomerUsersService();
+            var graphAccount = await graphService.InitializeAccountAsync(partnerTenantId, clientId, parentWindowHandle, cancellationToken);
 
             var correlationId = Guid.NewGuid();
             var customersUri = new Uri($"{baseUrl}/v1/customers?size=200", UriKind.Absolute);
@@ -98,7 +101,7 @@ namespace FdaLicenseControl.Services
             foreach (var customer in customersForLicenses)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                progress?.Report($"Client {processedCustomerCount + skippedCustomerCount + 1}/{customerCount} : {customer.CompanyName}");
+                progress?.Report($"Microsoft 365 {processedCustomerCount + skippedCustomerCount + 1}/{customerCount} : {customer.CompanyName} — Partner Center");
 
                 var route = $"/v1/customers/{Uri.EscapeDataString(customer.CustomerId)}/subscribedskus";
                 Uri requestUri = ResolveRequestUri(baseUrl, route, customersUri);
@@ -182,7 +185,10 @@ namespace FdaLicenseControl.Services
                 processedCustomerLicenses.Add(customerLicense);
                 processedCustomerCount++;
                 subscribedSkuCount += skuItems.Count;
-                progress?.Report($"{processedCustomerCount} client(s) Microsoft 365 traité(s)...");
+
+                var graphResult = await graphService.DownloadUsersAsync(customer.TenantId, graphAccount, cancellationToken);
+                ApplyGraphResult(customerLicense, graphResult);
+                progress?.Report($"Microsoft 365 {processedCustomerCount + skippedCustomerCount}/{customerCount} : {customer.CompanyName} — Microsoft Graph");
             }
 
             if (processedCustomerCount + skippedCustomerCount != customerCount)
@@ -195,6 +201,10 @@ namespace FdaLicenseControl.Services
                 ProcessedCustomerCount = processedCustomerCount,
                 SkippedCustomerCount = skippedCustomerCount,
                 SubscribedSkuCount = subscribedSkuCount,
+                GraphProcessedCustomerCount = processedCustomerLicenses.Count(x => GetString(x, "graphStatus") == "Success"),
+                GraphSkippedCustomerCount = processedCustomerLicenses.Count(x => GetString(x, "graphStatus") != "Success"),
+                GraphUserCount = processedCustomerLicenses.Sum(x => GetInt(x, "graphUserCount")),
+                GraphOfficeCount = processedCustomerLicenses.Sum(x => GetInt(x, "graphOfficeCount")),
                 AccountName = tokenContext.AccountName
             };
 
@@ -218,6 +228,10 @@ namespace FdaLicenseControl.Services
                 ["processedCustomerCount"] = processedCustomerCount,
                 ["skippedCustomerCount"] = skippedCustomerCount,
                 ["subscribedSkuCount"] = subscribedSkuCount,
+                ["graphProcessedCustomerCount"] = result.GraphProcessedCustomerCount,
+                ["graphSkippedCustomerCount"] = result.GraphSkippedCustomerCount,
+                ["graphUserCount"] = result.GraphUserCount,
+                ["graphOfficeCount"] = result.GraphOfficeCount,
                 ["customers"] = BuildCustomersArray(customerObjects),
                 ["customerLicenses"] = BuildJsonArray(processedCustomerLicenses),
                 ["skippedCustomers"] = BuildJsonArray(skippedCustomers)
@@ -263,9 +277,254 @@ namespace FdaLicenseControl.Services
                 ProcessedCustomerCount = processedCustomerCount,
                 SkippedCustomerCount = skippedCustomerCount,
                 SubscribedSkuCount = subscribedSkuCount,
+                GraphProcessedCustomerCount = result.GraphProcessedCustomerCount,
+                GraphSkippedCustomerCount = result.GraphSkippedCustomerCount,
+                GraphUserCount = result.GraphUserCount,
+                GraphOfficeCount = result.GraphOfficeCount,
                 AccountName = tokenContext.AccountName,
                 FilePath = filePath
             };
+        }
+
+        private static void ApplyGraphResult(JsonObject customerLicense, MicrosoftGraphCustomerUsersResult graphResult)
+        {
+            customerLicense["graphStatus"] = graphResult.Status;
+            customerLicense["graphErrorCode"] = graphResult.ErrorCode;
+            customerLicense["graphErrorMessage"] = graphResult.ErrorMessage;
+            customerLicense["graphUserCount"] = graphResult.UserCount;
+            customerLicense["graphLicensedUserCount"] = graphResult.LicensedUserCount;
+            customerLicense["graphUserWithOfficeCount"] = graphResult.UserWithOfficeCount;
+            customerLicense["graphOfficeCount"] = graphResult.OfficeCount;
+            customerLicense["graphAssignedLicenseCount"] = graphResult.AssignedLicenseCount;
+            customerLicense["graphUsers"] = graphResult.Users.DeepClone();
+            customerLicense["officeLicenses"] = BuildOfficeLicenses(graphResult.Users, customerLicense);
+            customerLicense["graphPartnerDifferences"] = BuildDifferences(customerLicense, graphResult.Users);
+        }
+
+        private static JsonArray BuildOfficeLicenses(JsonArray graphUsers, JsonObject customerLicense)
+        {
+            var officeMap = new Dictionary<string, OfficeAccumulator>(StringComparer.OrdinalIgnoreCase);
+            var skuMap = BuildSkuMap(customerLicense);
+
+            foreach (var userNode in graphUsers)
+            {
+                if (userNode is not JsonObject userObject)
+                    continue;
+
+                var officeLocation = GetString(userObject, "officeLocation");
+                var officeKey = string.IsNullOrWhiteSpace(officeLocation) ? "Sans bureau" : officeLocation.Trim();
+                if (!officeMap.TryGetValue(officeKey, out var accumulator))
+                {
+                    accumulator = new OfficeAccumulator { OfficeLocation = officeKey };
+                    officeMap[officeKey] = accumulator;
+                }
+
+                if (userObject["assignedLicenses"] is JsonArray assignedLicenses)
+                {
+                    foreach (var assignedLicense in assignedLicenses)
+                    {
+                        if (assignedLicense is not JsonObject licenseObject)
+                            continue;
+
+                        var skuId = GetString(licenseObject, "skuId");
+                        if (string.IsNullOrWhiteSpace(skuId))
+                            continue;
+
+                        if (!skuMap.TryGetValue(skuId, out var category))
+                            continue;
+
+                        accumulator.Add(category);
+                    }
+                }
+            }
+
+            var ordered = officeMap.Values
+                .OrderBy(x => x.OfficeLocation, StringComparer.Create(System.Globalization.CultureInfo.GetCultureInfo("fr-FR"), true));
+
+            var array = new JsonArray();
+            foreach (var item in ordered)
+            {
+                array.Add(new JsonObject
+                {
+                    ["officeLocation"] = item.OfficeLocation,
+                    ["businessBasicUsed"] = item.BusinessBasicUsed,
+                    ["businessStandardUsed"] = item.BusinessStandardUsed,
+                    ["exchangeOnlinePlan1Used"] = item.ExchangeOnlinePlan1Used,
+                    ["teamsEssentialsUsed"] = item.TeamsEssentialsUsed,
+                    ["totalUsed"] = item.TotalUsed
+                });
+            }
+
+            return array;
+        }
+
+        private static JsonObject BuildDifferences(JsonObject customerLicense, JsonArray graphUsers)
+        {
+            var graphStatus = GetString(customerLicense, "graphStatus");
+            if (!string.Equals(graphStatus, "Success", StringComparison.OrdinalIgnoreCase))
+            {
+                return new JsonObject
+                {
+                    ["businessBasic"] = 0,
+                    ["businessStandard"] = 0,
+                    ["exchangeOnlinePlan1"] = 0,
+                    ["teamsEssentials"] = 0,
+                    ["total"] = 0
+                };
+            }
+
+            var partnerBasic = 0;
+            var partnerStandard = 0;
+            var partnerExchange = 0;
+            var partnerTeams = 0;
+
+            if (customerLicense["subscribedSkus"] is JsonArray subscribedSkus)
+            {
+                foreach (var skuNode in subscribedSkus)
+                {
+                    if (skuNode is not JsonObject skuObject)
+                        continue;
+
+                    if (skuObject["productSku"] is not JsonObject productSku)
+                        continue;
+
+                    var skuPartNumber = GetString(productSku, "skuPartNumber");
+                    var consumedUnits = GetInt(skuObject, "consumedUnits");
+
+                    if (string.Equals(skuPartNumber, "O365_BUSINESS_ESSENTIALS", StringComparison.OrdinalIgnoreCase))
+                        partnerBasic += consumedUnits;
+                    else if (string.Equals(skuPartNumber, "O365_BUSINESS_PREMIUM", StringComparison.OrdinalIgnoreCase))
+                        partnerStandard += consumedUnits;
+                    else if (string.Equals(skuPartNumber, "EXCHANGESTANDARD", StringComparison.OrdinalIgnoreCase))
+                        partnerExchange += consumedUnits;
+                    else if (string.Equals(skuPartNumber, "TEAMS_ESSENTIALS_AAD", StringComparison.OrdinalIgnoreCase))
+                        partnerTeams += consumedUnits;
+                }
+            }
+
+            var skuMap = BuildSkuMap(customerLicense);
+            var graphBasic = 0;
+            var graphStandard = 0;
+            var graphExchange = 0;
+            var graphTeams = 0;
+
+            foreach (var userNode in graphUsers)
+            {
+                if (userNode is not JsonObject userObject)
+                    continue;
+
+                if (userObject["assignedLicenses"] is not JsonArray assignedLicenses)
+                    continue;
+
+                foreach (var assignedLicense in assignedLicenses)
+                {
+                    if (assignedLicense is not JsonObject licenseObject)
+                        continue;
+
+                    var skuId = GetString(licenseObject, "skuId");
+                    if (string.IsNullOrWhiteSpace(skuId))
+                        continue;
+
+                    if (!skuMap.TryGetValue(skuId, out var category))
+                        continue;
+
+                    if (string.Equals(category, "BusinessBasic", StringComparison.OrdinalIgnoreCase))
+                        graphBasic++;
+                    else if (string.Equals(category, "BusinessStandard", StringComparison.OrdinalIgnoreCase))
+                        graphStandard++;
+                    else if (string.Equals(category, "ExchangeOnlinePlan1", StringComparison.OrdinalIgnoreCase))
+                        graphExchange++;
+                    else if (string.Equals(category, "TeamsEssentials", StringComparison.OrdinalIgnoreCase))
+                        graphTeams++;
+                }
+            }
+
+            var totalPartner = partnerBasic + partnerStandard + partnerExchange + partnerTeams;
+            var totalGraph = graphBasic + graphStandard + graphExchange + graphTeams;
+            var totalDifference = totalPartner - totalGraph;
+
+#if DEBUG
+            var companyName = GetString(customerLicense, "companyName");
+            System.Diagnostics.Debug.WriteLine(
+                $"Microsoft Graph comparison: client={companyName}, " +
+                $"partnerBasic={partnerBasic}, " +
+                $"graphBasic={graphBasic}, " +
+                $"partnerStandard={partnerStandard}, " +
+                $"graphStandard={graphStandard}, " +
+                $"difference={totalDifference}");
+#endif
+
+            return new JsonObject
+            {
+                ["businessBasic"] = partnerBasic - graphBasic,
+                ["businessStandard"] = partnerStandard - graphStandard,
+                ["exchangeOnlinePlan1"] = partnerExchange - graphExchange,
+                ["teamsEssentials"] = partnerTeams - graphTeams,
+                ["total"] = totalDifference
+            };
+        }
+
+        private static Dictionary<string, string> BuildSkuMap(JsonObject customerLicense)
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (customerLicense["subscribedSkus"] is not JsonArray subscribedSkus)
+                return map;
+
+            foreach (var skuNode in subscribedSkus)
+            {
+                if (skuNode is not JsonObject skuObject)
+                    continue;
+
+                var productSku = skuObject["productSku"] as JsonObject;
+                if (productSku == null)
+                    continue;
+
+                var skuId = GetString(productSku, "id");
+                var skuPartNumber = GetString(productSku, "skuPartNumber");
+                if (string.IsNullOrWhiteSpace(skuId))
+                    continue;
+
+                if (string.Equals(skuPartNumber, "O365_BUSINESS_ESSENTIALS", StringComparison.OrdinalIgnoreCase))
+                    map[skuId] = "BusinessBasic";
+                else if (string.Equals(skuPartNumber, "O365_BUSINESS_PREMIUM", StringComparison.OrdinalIgnoreCase))
+                    map[skuId] = "BusinessStandard";
+                else if (string.Equals(skuPartNumber, "EXCHANGESTANDARD", StringComparison.OrdinalIgnoreCase))
+                    map[skuId] = "ExchangeOnlinePlan1";
+                else if (string.Equals(skuPartNumber, "TEAMS_ESSENTIALS_AAD", StringComparison.OrdinalIgnoreCase))
+                    map[skuId] = "TeamsEssentials";
+            }
+
+            return map;
+        }
+
+        private static int GetInt(JsonObject obj, string propertyName)
+        {
+            if (!obj.TryGetPropertyValue(propertyName, out var node) || node == null)
+                return 0;
+
+            return node.GetValue<int>();
+        }
+
+        private sealed class OfficeAccumulator
+        {
+            public string OfficeLocation { get; set; } = string.Empty;
+            public int BusinessBasicUsed { get; set; }
+            public int BusinessStandardUsed { get; set; }
+            public int ExchangeOnlinePlan1Used { get; set; }
+            public int TeamsEssentialsUsed { get; set; }
+            public int TotalUsed => BusinessBasicUsed + BusinessStandardUsed + ExchangeOnlinePlan1Used + TeamsEssentialsUsed;
+
+            public void Add(string category)
+            {
+                if (string.Equals(category, "BusinessBasic", StringComparison.OrdinalIgnoreCase))
+                    BusinessBasicUsed++;
+                else if (string.Equals(category, "BusinessStandard", StringComparison.OrdinalIgnoreCase))
+                    BusinessStandardUsed++;
+                else if (string.Equals(category, "ExchangeOnlinePlan1", StringComparison.OrdinalIgnoreCase))
+                    ExchangeOnlinePlan1Used++;
+                else if (string.Equals(category, "TeamsEssentials", StringComparison.OrdinalIgnoreCase))
+                    TeamsEssentialsUsed++;
+            }
         }
 
         private static CustomerDescriptor? BuildCustomerDescriptor(JsonObject customerObject)

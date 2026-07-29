@@ -130,12 +130,15 @@ namespace FdaLicenseControl.Services
                 }
             }
 
+            var offices = ReadOffices(entryElement);
+
             return new Microsoft365CustomerLicenseInventory
             {
                 CustomerId = customerId,
                 TenantId = tenantId,
                 CompanyName = companyName,
                 Domain = domain,
+                GraphStatus = ReadString(entryElement, "graphStatus"),
                 BusinessBasicUsed = businessBasicUsed,
                 BusinessBasicActive = businessBasicActive,
                 BusinessBasicAvailable = businessBasicAvailable,
@@ -147,8 +150,41 @@ namespace FdaLicenseControl.Services
                 ExchangeOnlinePlan1Available = exchangeOnlinePlan1Available,
                 TeamsEssentialsUsed = teamsEssentialsUsed,
                 TeamsEssentialsActive = teamsEssentialsActive,
-                TeamsEssentialsAvailable = teamsEssentialsAvailable
+                TeamsEssentialsAvailable = teamsEssentialsAvailable,
+                Offices = offices
             };
+        }
+
+        private static IReadOnlyList<Microsoft365OfficeLicenseInventory> ReadOffices(JsonElement entryElement)
+        {
+            if (!entryElement.TryGetProperty("officeLicenses", out var officeLicensesElement) || officeLicensesElement.ValueKind != JsonValueKind.Array)
+                return Array.Empty<Microsoft365OfficeLicenseInventory>();
+
+            var offices = new List<Microsoft365OfficeLicenseInventory>();
+            foreach (var officeElement in officeLicensesElement.EnumerateArray())
+            {
+                if (officeElement.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                var officeLocation = ReadString(officeElement, "officeLocation");
+                if (string.IsNullOrWhiteSpace(officeLocation))
+                    officeLocation = "Sans bureau";
+                else
+                    officeLocation = officeLocation.Trim();
+
+                offices.Add(new Microsoft365OfficeLicenseInventory
+                {
+                    OfficeLocation = officeLocation,
+                    BusinessBasicUsed = ReadNonNegativeInt(officeElement, "businessBasicUsed", officeLocation),
+                    BusinessStandardUsed = ReadNonNegativeInt(officeElement, "businessStandardUsed", officeLocation),
+                    ExchangeOnlinePlan1Used = ReadNonNegativeInt(officeElement, "exchangeOnlinePlan1Used", officeLocation),
+                    TeamsEssentialsUsed = ReadNonNegativeInt(officeElement, "teamsEssentialsUsed", officeLocation),
+                    TotalUsed = ReadNonNegativeInt(officeElement, "totalUsed", officeLocation)
+                });
+            }
+
+            var comparer = StringComparer.Create(CultureInfo.GetCultureInfo("fr-FR"), true);
+            return offices.OrderBy(x => x.OfficeLocation, comparer).ToList();
         }
 
         private static int ReadNonNegativeInt(JsonElement element, string propertyName, string companyName)

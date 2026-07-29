@@ -570,7 +570,7 @@ namespace FdaLicenseControl
             try
             {
                 var service = new MicrosoftPartnerAuthenticationService();
-                var result = await service.TestConnectionAsync(partnerTenantId, clientId, baseUrl);
+                var result = await service.TestConnectionAsync(partnerTenantId, clientId, baseUrl, this.Handle, CancellationToken.None);
 
                 var complianceText = result.IsMfaCompliant == true ? "Oui" : "Non vérifiable";
                 MessageBox.Show(this,

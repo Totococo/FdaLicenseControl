@@ -1,5 +1,20 @@
 namespace FdaLicenseControl.Models
 {
+    public sealed class Microsoft365OfficeLicenseInventory
+    {
+        public string OfficeLocation { get; init; } = string.Empty;
+
+        public int BusinessBasicUsed { get; init; }
+
+        public int BusinessStandardUsed { get; init; }
+
+        public int ExchangeOnlinePlan1Used { get; init; }
+
+        public int TeamsEssentialsUsed { get; init; }
+
+        public int TotalUsed { get; init; }
+    }
+
     public sealed class Microsoft365CustomerLicenseInventory
     {
         public string CustomerId { get; init; } = string.Empty;
@@ -9,6 +24,10 @@ namespace FdaLicenseControl.Models
         public string CompanyName { get; init; } = string.Empty;
 
         public string Domain { get; init; } = string.Empty;
+
+        public string GraphStatus { get; init; } = string.Empty;
+
+        public IReadOnlyList<Microsoft365OfficeLicenseInventory> Offices { get; init; } = Array.Empty<Microsoft365OfficeLicenseInventory>();
 
         public int BusinessBasicUsed { get; init; }
 

@@ -14,6 +14,14 @@ namespace FdaLicenseControl.Models
 
         public int SubscribedSkuCount { get; init; }
 
+        public int GraphProcessedCustomerCount { get; init; }
+
+        public int GraphSkippedCustomerCount { get; init; }
+
+        public int GraphUserCount { get; init; }
+
+        public int GraphOfficeCount { get; init; }
+
         public string AccountName { get; init; } = string.Empty;
 
         public string FilePath { get; init; } = string.Empty;
